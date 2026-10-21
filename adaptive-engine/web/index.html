@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>K12 自适应学习引擎</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%2321618c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+<header>
+  <h1>K12 自适应学习引擎 <span class="sub">知识图谱 · 掌握度 · 错题归因 · 路径规划</span></h1>
+  <div id="errorBanner" class="error-banner hidden"></div>
+  <div class="controls">
+    <label>学段
+      <select id="bandSel"></select>
+    </label>
+    <label>科目
+      <select id="subjectSel"></select>
+    </label>
+    <label>学生
+      <select id="studentSel"></select>
+    </label>
+    <button id="newStudentBtn" title="创建新学生">＋学生</button>
+    <label class="chk"><input type="checkbox" id="showMastered" checked> 显示已掌握着色</label>
+  </div>
+</header>
+
+<main>
+  <section class="graph-panel">
+    <div class="toolbar">
+      <input id="searchBox" placeholder="搜索知识点…（回车）" autocomplete="off">
+      <div id="searchResults" class="search-results"></div>
+      <button id="fitBtn" title="缩放到能看见完整图谱">适应窗口</button>
+      <span id="graphStats" class="stats"></span>
+    </div>
+    <div id="graphWrap" class="graph-wrap">
+      <svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+    <div class="legend">
+      <span><i class="dot" style="background:#e74c3c"></i>未掌握</span>
+      <span><i class="dot" style="background:#f39c12"></i>学习中</span>
+      <span><i class="dot" style="background:#27ae60"></i>已掌握</span>
+      <span><i class="dot" style="background:#95a5a6"></i>未作答</span>
+      <span><i class="dot ring"></i>根因</span>
+      <span><i class="dot low"></i>低置信度（仅目录抽取）</span>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div id="kpCard" class="card hidden">
+      <h2 id="kpName"></h2>
+      <div id="kpMeta" class="meta"></div>
+      <div id="masteryBar" class="mbar"><div class="fill"></div><span class="txt"></span></div>
+      <div id="figureSlot" class="figure-slot hidden"></div>
+      <div id="kpBody"></div>
+      <div class="actions">
+        <button class="ok" id="btnCorrect">✓ 做对了</button>
+        <button class="bad" id="btnWrong">✗ 做错了</button>
+      </div>
+      <div id="attemptFeedback" class="feedback"></div>
+      <div class="actions">
+        <button id="btnPlan">学习路径 →</button>
+        <button id="btnDiagnose">归因此错</button>
+      </div>
+    </div>
+
+    <div id="emptyHint" class="card hint">
+      <h3>如何使用</h3>
+      <ol>
+        <li>左上选择学段/科目，图中点一个知识点</li>
+        <li>点「✓/✗」模拟作答，观察掌握度变化</li>
+        <li>点「归因此错」沿先修链找病根</li>
+        <li>点「学习路径」生成分阶段补救计划</li>
+      </ol>
+      <p class="tiny">先修关系只在同一学科同学段内成立。</p>
+    </div>
+
+    <div id="planCard" class="card hidden">
+      <h3>学习路径 <button class="x" data-close="planCard">✕</button></h3>
+      <div id="planBody"></div>
+    </div>
+
+    <div id="diagCard" class="card hidden">
+      <h3>错题归因 <button class="x" data-close="diagCard">✕</button></h3>
+      <div id="diagBody"></div>
+    </div>
+  </aside>
+</main>
+
+<div id="figureModal" class="figure-modal hidden" role="dialog" aria-modal="true" aria-labelledby="figureTitle">
+  <div class="figure-modal-box">
+    <div class="figure-modal-head">
+      <div class="figure-modal-title">
+        <b id="figureTitle"></b>
+        <span id="figureSub" class="tiny"></span>
+      </div>
+      <div class="figure-modal-tools">
+        <a id="figureStandalone" href="#" target="_blank" rel="noopener">新窗口打开</a>
+        <button id="figureClose" class="x" title="关闭">✕</button>
+      </div>
+    </div>
+    <div id="figureStatus" class="figure-status tiny"></div>
+    <iframe id="figureFrame" class="figure-frame" title="欧姆定律实验台" loading="lazy"></iframe>
+  </div>
+</div>
+
+<script src="/static/app.js?v=3"></script>
+</body>
+</html>

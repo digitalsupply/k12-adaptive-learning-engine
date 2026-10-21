@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "figures": {
+    "ohm-lab": {
+      "id": "ohm-lab",
+      "title": "欧姆定律实验台",
+      "subtitle": "串联滑线变阻器 · 三种接法 · I–U 记录纸",
+      "description": "拖动滑片改变串联电阻，观察电流表、电压表和记录纸上的笔迹，验证 U / I = R。",
+      "embed_url": "/figures/ohm-lab/embed.html",
+      "embed_dark_url": "/figures/ohm-lab/embed-dark.html",
+      "standalone_url": "/figures/ohm-lab/ohm-lab-light.html",
+      "standalone_dark_url": "/figures/ohm-lab/ohm-lab.html",
+      "version": "1"
+    }
+  },
+  "by_kp": {
+    "81d142c4-baa5-432f-97d1-af8922180401": "ohm-lab",
+    "40e0b8d3-dea9-4072-aa6f-a262507d3892": "ohm-lab",
+    "bafa7032-1dff-4490-aaf3-c6992e36b575": "ohm-lab",
+    "d472726f-b2fe-49b4-a4a1-dca096c07dbe": "ohm-lab",
+    "95d61293-4cd4-4781-a449-5261897ecc77": "ohm-lab",
+    "02174da0-415c-4b22-af67-96236b11a31a": "ohm-lab",
+    "4d5735d7-813e-41b0-a389-0ecaca0b0b4a": "ohm-lab",
+    "a7f9cff8-bcac-421c-ac13-21c4d5329c9f": "ohm-lab",
+    "483911bc-cda4-4fce-b785-0a57b7ba6524": "ohm-lab"
+  }
+}

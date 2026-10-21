@@ -88,6 +88,4 @@ split/                  # 按学段×科目拆分（推荐使用，单文件 190
 
 本系统由云一工作室主理人 **猫叔** 独立开发。仓库地址：https://github.com/mmlong818/k12-knowledge-points
 
-许可证：[PolyForm Noncommercial 1.0.0](./LICENSE)——允许个人使用、学习、修改和非商业分发；**不允许任何商业用途，包括商业性的二次创作与分发**。
-
-> Required Notice: Copyright © 2026 猫叔 (https://github.com/mmlong818/k12-knowledge-points)
+许可证：[PolyForm Noncommercial 1.0.0](./LICENSE)——允许个人使用、学习、修改。
