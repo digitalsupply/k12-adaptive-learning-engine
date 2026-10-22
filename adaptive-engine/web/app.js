@@ -40,6 +40,105 @@ function showError(msg) {
 }
 
 /* ---------------- 初始化 ---------------- */
+
+/* 把学生列表写入下拉框并定当前学生：
+   优先登录用户绑定的档案，其次自己的档案，再退回演示/未归属档案。 */
+function setStateStudents(students) {
+  const mine = students.filter(s => s.mine);
+  const pickId = (state.user && state.user.student_id) || (mine[0] && mine[0].id) ||
+                 (students[0] && students[0].id) || null;
+  fillSelect($("studentSel"), students.map(s => s.id),
+             students.map(s =>
+               `${s.name} · ${s.model.toUpperCase()}${s.is_demo ? " · 演示" : ""}`));
+  state.student = pickId;
+  if (pickId) $("studentSel").value = pickId;
+}
+
+/* ---------------- 认证（登录/注册/游客） ---------------- */
+
+async function refreshAuth() {
+  try {
+    const r = await api("/api/auth/me");
+    state.user = r.user;
+  } catch (_) { state.user = null; }
+  renderAuthBar();
+}
+
+function renderAuthBar() {
+  const who = $("authWho"), loginBtn = $("loginBtn");
+  if (state.user) {
+    who.classList.remove("hidden");
+    who.textContent = state.user.is_guest
+      ? "游客模式 · 数据不长期保留"
+      : state.user.username;
+    who.title = state.user.is_guest ? "注册后数据可长期保存" : "";
+    loginBtn.classList.add("hidden");
+    $("logoutBtn").classList.remove("hidden");
+  } else {
+    who.classList.add("hidden");
+    loginBtn.classList.remove("hidden");
+    $("logoutBtn").classList.add("hidden");
+  }
+}
+
+let authMode = "login";
+function openAuth(mode = "login", notice = "") {
+  authMode = mode;
+  $("authTitle").textContent = mode === "login" ? "登录" : "注册新账号";
+  $("tabLogin").classList.toggle("on", mode === "login");
+  $("tabRegister").classList.toggle("on", mode === "register");
+  $("authSubmit").textContent = mode === "login" ? "登录" : "注册";
+  $("authErr").classList.toggle("hidden", !notice);
+  $("authErr").textContent = notice || "";
+  $("authUser").value = ""; $("authPass").value = "";
+  $("authModal").classList.remove("hidden");
+  $("authUser").focus();
+}
+function closeAuth() { $("authModal").classList.add("hidden"); }
+
+async function authSubmit() {
+  const username = $("authUser").value.trim();
+  const password = $("authPass").value;
+  try {
+    const path = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+    const r = await post(path, { username, password });
+    state.user = r.user;
+    closeAuth();
+    await reloadSession();
+    showError(`欢迎，${state.user.username}！已切换到你的学习档案。`);
+  } catch (e) {
+    $("authErr").classList.remove("hidden");
+    $("authErr").textContent = e.message;
+  }
+}
+
+async function authGuest() {
+  try {
+    const r = await post("/api/auth/guest", {});
+    state.user = r.user;
+    closeAuth();
+    await reloadSession();
+  } catch (e) {
+    $("authErr").classList.remove("hidden");
+    $("authErr").textContent = e.message;
+  }
+}
+
+/* 登录/注册/游客成功后：刷新用户与学生列表，切到自己的档案 */
+async function reloadSession() {
+  renderAuthBar();
+  const students = await api("/api/students");
+  const mine = students.filter(s => s.mine);
+  const wanted = (state.user && state.user.student_id) || (mine[0] && mine[0].id);
+  if (wanted && students.some(s => s.id === wanted)) {
+    state.student = wanted; $("studentSel").value = wanted;
+  } else {
+    setStateStudents(students);
+  }
+  state.selected = null;
+  if (state.viewMode === "map") await loadGraph(); else await enterChainView();
+}
+
 async function init() {
   await refreshAuth();                       // 会话：谁在登录（含游客）
   state.groups = await api("/api/groups");
@@ -95,7 +194,6 @@ async function init() {
     location.reload();
   };
 
-  $("showMastered").onchange = renderGraph;
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
   $("scopeSel").onchange = async (e) => {
