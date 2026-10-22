@@ -759,10 +759,11 @@ async function submitAnswer(choice) {
     showError(e.message);
     q.answered = false;
     if (/409|刷新/.test(e.message)) {
-      // 题面与判分对不上（缓存被清、答案库也没这道题）→ 自动换一题，
-      // 不再让用户自己去点「换一题」
+      // 这题服务端已没有任何判分信息（极少发生：答案库和出题缓存都没了，
+      // 基本只出现在服务部署/清理瞬间）。停在原地说明情况，不自动跳题。
       state.quiz = null;
-      await askQuestion();
+      slot.innerHTML = `<div class="quiz-none">⚠ 这道题的判分信息已失效（多半是服务端刚更新过），` +
+        `暂时给不出解析。点「出一题」换一道新题继续。</div>`;
     } else {
       renderQuiz();
     }

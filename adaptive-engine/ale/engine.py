@@ -323,6 +323,9 @@ class AdaptiveEngine:
         if question is None:
             raise _quiz.NoQuestionError(f"该知识点无法重建题目：{kp_id}")
         if qhash is not None and question.qhash != qhash:
+            print(f"[qhash-mismatch] sid={sid} kp={kp_id} seed={seed} "
+                  f"给出={qhash} 重建={question.qhash}（答案库上/下线后均应查得）",
+                  flush=True)
             raise QHashMismatch("题目已刷新，请重新获取再作答")
         if not (0 <= choice < len(question.options)):
             raise ValueError(f"选项越界：{choice}")
