@@ -65,11 +65,24 @@
       <div id="masteryBar" class="mbar"><div class="fill"></div><span class="txt"></span></div>
       <div id="figureSlot" class="figure-slot hidden"></div>
       <div id="kpBody"></div>
+
+      <div id="quizSlot" class="quiz-slot"></div>
+
       <div class="actions">
-        <button class="ok" id="btnCorrect">✓ 做对了</button>
-        <button class="bad" id="btnWrong">✗ 做错了</button>
+        <button id="btnAsk" class="primary">练习一下 →</button>
+        <button id="btnNextQ" class="hidden">换一题</button>
       </div>
       <div id="attemptFeedback" class="feedback"></div>
+
+      <details class="selfassess">
+        <summary>不用出题，只做自评</summary>
+        <div class="actions">
+          <button class="ok" id="btnCorrect">我已掌握</button>
+          <button class="bad" id="btnWrong">还不熟</button>
+        </div>
+        <p class="tiny">自评不产生客观作答记录，只作为掌握度的弱证据参与衰减。</p>
+      </details>
+
       <div class="actions">
         <button id="btnPlan">学习路径 →</button>
         <button id="btnDiagnose">归因此错</button>

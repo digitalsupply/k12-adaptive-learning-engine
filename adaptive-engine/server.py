@@ -43,6 +43,12 @@ class AttemptsIn(BaseModel):
     attempts: list[AttemptIn] = Field(..., min_length=1, max_length=5000)
 
 
+class AnswerIn(BaseModel):
+    kp_id: str
+    seed: int = 0
+    choice: int = Field(..., ge=0, le=9)
+
+
 class DiagnoseIn(BaseModel):
     kp_ids: list[str] = Field(..., min_length=1)
 
@@ -315,6 +321,29 @@ def record_attempt(sid: str, body: AttemptIn) -> dict[str, Any]:
         d = eng.diagnose(sid, [r.kp_id])
         out["diagnosis"] = d.to_dict()["root_causes"][:3]
     return out
+
+
+@app.get("/api/quiz/{kp_id}")
+def make_quiz(kp_id: str, seed: int = 0) -> dict[str, Any]:
+    """出一道题。响应里不含正确答案——判分在 POST /api/students/{sid}/answer 里做。"""
+    try:
+        q = eng.make_question(kp_id, seed=seed)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return q.to_dict()
+
+
+@app.post("/api/students/{sid}/answer")
+def answer_quiz(sid: str, body: AnswerIn) -> dict[str, Any]:
+    """提交作答：服务端重建题目判分 → 写入掌握度 → 答错时自动归因。"""
+    try:
+        return eng.answer_question(sid, body.kp_id, body.seed, body.choice)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.post("/api/students/{sid}/attempts")

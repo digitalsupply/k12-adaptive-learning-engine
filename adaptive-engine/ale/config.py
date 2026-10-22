@@ -48,6 +48,12 @@ class Config:
     # 路径规划
     plan_max_nodes: int = 40     # 单条学习路径最多包含的知识点数
 
+    # 出题
+    # assessability 低于此值的知识点不出题（素材质量不足，题目会没有意义）
+    quiz_min_assessability: float = 0.5
+    # 每次答题抽题用的随机种子偏移量（配合 kp_id 保证同一知识点题目可复现）
+    quiz_seed_salt: int = 0
+
     # 遗忘
     bkt_forget_per_day: float = 0.02   # BKT P(L) 向先验指数回落速率/天
     elo_forget_per_day: float = 0.01   # Elo 能力值向初始值回落速率/天

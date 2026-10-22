@@ -257,6 +257,21 @@ class Dataset:
             node = ann.get(key)
             return node.get("value", default) if isinstance(node, dict) else default
 
+        def val_any(*keys: str, default: Any = None) -> Any:
+            """按多个候选 key 依次取值。
+
+            数据集里 annotation 的 key 是驼峰（learningObjectives），早期代码按
+            蛇形（learning_objectives）读，结果「学习目标」对全部 3 万多个知识点
+            都是空的。这里两种写法都认。
+            """
+            for k in keys:
+                if k in ann:
+                    v = ann[k]
+                    v = v.get("value") if isinstance(v, dict) else v
+                    if v is not None:
+                        return v
+            return default
+
         aliases = item.get("aliases") or "[]"
         if isinstance(aliases, str):
             try:
@@ -281,8 +296,11 @@ class Dataset:
             summary=item.get("summary") or "",
             kp_type=str(ktype),
             difficulty=float(val("difficulty", 0.5) or 0.5),
-            learning_objectives=[s for s in val("learning_objectives", []) or [] if isinstance(s, str)],
-            misconceptions=[s for s in val("misconceptions", []) or [] if isinstance(s, str)],
+            learning_objectives=[s for s in (val_any("learningObjectives",
+                                                     "learning_objectives", default=[]) or [])
+                                if isinstance(s, str)],
+            misconceptions=[s for s in (val_any("misconceptions", default=[]) or [])
+                            if isinstance(s, str)],
             assessability=float(val("assessability", 0.5) or 0.5),
             textbooks=list(item.get("textbooks") or []),
         )

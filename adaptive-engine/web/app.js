@@ -25,6 +25,7 @@ const state = {
   scope: "all",            // all | depth3 | depth5 | depth8 | focus
   focusRoot: null,         // 聚焦模式的根节点
   cfg: { mastered_threshold: 0.85, low_confidence_hint: 0.6 },
+  quiz: null,              // 当前题目 {kp_id, seed, options, answered}
 };
 let loadSeq = 0;   // 请求序号：丢弃过期响应，避免竞态
 
@@ -416,29 +417,124 @@ function renderKpCard(d) {
   }
   $("kpBody").innerHTML = html;
   $("attemptFeedback").innerHTML = "";
+  // 换了知识点就换题：清掉上一题的选项和结果
+  state.quiz = null;
+  $("quizSlot").innerHTML = "";
+  $("btnNextQ").classList.add("hidden");
   document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => $(b.dataset.close).classList.add("hidden"));
 }
 
 function kv(title, inner) { return `<div class="kv"><b>${title}</b><ul>${inner}</ul></div>`; }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
-/* ---------------- 作答 / 归因 / 规划 ---------------- */
+/* ---------------- 出题 / 作答 ---------------- */
 
-async function record(correct) {
+/* 出一道题。题目由服务端按 (kp_id, seed) 确定性生成，判分也在服务端，
+   这里只负责展示和提交选项。 */
+async function askQuestion() {
   if (!state.selected) return;
+  const slot = $("quizSlot");
+  const btn = $("btnAsk");
+  btn.disabled = true;
   try {
-    const r = await post(`/api/students/${state.student}/attempt`,
-                         { kp_id: state.selected, correct });
-    const up = r.p_after >= r.p_before;
-    $("attemptFeedback").innerHTML =
-      `<span class="${up || r.mastered ? "up" : "down"}">${correct ? "✓" : "✗"} ` +
-      `掌握度 ${(r.p_before * 100).toFixed(0)}% → ${(r.p_after * 100).toFixed(0)}%` +
-      `${r.mastered ? "　🎉 已掌握！" : ""}</span>` +
-      (r.diagnosis?.length ? `<div style="margin-top:6px">⚡ 疑似根因：` +
-        r.diagnosis.slice(0, 2).map(c => `<b>${esc(c.name)}</b>(掌握 ${(c.p_mastery * 100).toFixed(0)}%)`).join("、") + `</div>` : "");
+    const seed = Math.floor(Math.random() * 1e6);
+    const q = await api(`/api/quiz/${encodeURIComponent(state.selected)}?seed=${seed}`);
+    state.quiz = { ...q, answered: false };
+    renderQuiz();
+    $("btnNextQ").classList.remove("hidden");
+  } catch (e) {
+    // 该知识点没有可用的题目素材（可测评性过低 / 标注缺失）
+    state.quiz = null;
+    slot.innerHTML = `<div class="quiz-none">⚠ 该知识点暂无可出题素材（可测评性不足或标注缺失），可用下方自评。</div>`;
+    $("btnNextQ").classList.add("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderQuiz() {
+  const slot = $("quizSlot");
+  const q = state.quiz;
+  if (!q) { slot.innerHTML = ""; return; }
+  const letters = "ABCDEFGH";
+  slot.innerHTML = `
+    <div class="quiz">
+      <div class="quiz-kind">${q.kind === "judge" ? "判断正误" : "单项选择"}</div>
+      <div class="quiz-prompt">${esc(q.prompt)}</div>
+      <div class="quiz-options">
+        ${q.options.map((o, i) => `
+          <button class="qopt" data-choice="${i}">
+            <span class="qletter">${letters[i]}</span>${esc(o)}
+          </button>`).join("")}
+      </div>
+    </div>`;
+  slot.querySelectorAll(".qopt").forEach(b => {
+    b.onclick = () => submitAnswer(Number(b.dataset.choice));
+  });
+}
+
+async function submitAnswer(choice) {
+  const q = state.quiz;
+  if (!q || q.answered) return;
+  q.answered = true;
+  const slot = $("quizSlot");
+  slot.querySelectorAll(".qopt").forEach(b => { b.disabled = true; });
+  try {
+    const r = await post(`/api/students/${encodeURIComponent(state.student)}/answer`, {
+      kp_id: q.kp_id, seed: q.seed, choice,
+    });
+    showQuizResult(r, q);
     updateMasteryAfterAttempt(r);
     await refreshGraphData();
     sendMasteryToFigure(r.p_after);
+  } catch (e) {
+    showError(e.message);
+    q.answered = false;
+    renderQuiz();
+  }
+}
+
+function showQuizResult(r, q) {
+  const slot = $("quizSlot");
+  const letters = "ABCDEFGH";
+  // 把选项标成 对 / 错
+  slot.querySelectorAll(".qopt").forEach(b => {
+    const i = Number(b.dataset.choice);
+    if (i === r.correct_index) b.classList.add("q-right");
+    else if (i === r.choice) b.classList.add("q-wrong");
+  });
+  const picked = r.choice === r.correct_index
+    ? "答对了"
+    : `答错了（你选的是 ${letters[r.choice]}）`;
+  const lines = [];
+  lines.push(`<div class="qr-head ${r.correct ? "ok" : "bad"}">
+    ${r.correct ? "✓" : "✗"} ${picked}　掌握度 ${(r.p_before * 100).toFixed(0)}% → ${(r.p_after * 100).toFixed(0)}%
+    ${r.mastered ? "　🎉 已掌握" : ""}</div>`);
+  lines.push(`<div class="qr-explain">${esc(r.explain).replace(/\n/g, "<br>")}</div>`);
+  if (!r.correct && r.misconception) {
+    lines.push(`<div class="qr-mis">💡 你很可能持有这个误区：<b>${esc(r.misconception)}</b></div>`);
+  }
+  if (r.diagnosis?.length) {
+    lines.push(`<div class="qr-diag">⚡ 沿先修链回溯，疑似根因：` +
+      r.diagnosis.slice(0, 2).map(c => `<b>${esc(c.name)}</b>（掌握 ${(c.p_mastery * 100).toFixed(0)}%）`).join("、") +
+      `</div>`);
+  }
+  slot.insertAdjacentHTML("beforeend", `<div class="qr">${lines.join("")}</div>`);
+}
+
+/* ---------------- 自评（没有题目时的弱证据） ---------------- */
+
+async function recordSelfAssess(strong) {
+  if (!state.selected) return;
+  try {
+    const r = await post(`/api/students/${encodeURIComponent(state.student)}/attempt`, {
+      kp_id: state.selected, correct: strong,
+    });
+    $("attemptFeedback").innerHTML =
+      `<span class="${strong ? "up" : "down"}">自评：${strong ? "我已掌握" : "还不熟"}　` +
+      `掌握度 ${(r.p_before * 100).toFixed(0)}% → ${(r.p_after * 100).toFixed(0)}%</span>`;
+    updateMasteryAfterAttempt(r);
+    await refreshGraphData();
   } catch (e) { showError(e.message); }
 }
 
@@ -569,8 +665,10 @@ async function refreshGraphData() {
   renderGraph();
 }
 
-$("btnCorrect").onclick = () => record(true);
-$("btnWrong").onclick = () => record(false);
+$("btnAsk").onclick = askQuestion;
+$("btnNextQ").onclick = askQuestion;
+$("btnCorrect").onclick = () => recordSelfAssess(true);
+$("btnWrong").onclick = () => recordSelfAssess(false);
 
 $("btnDiagnose").onclick = async () => {
   if (!state.selected) return;

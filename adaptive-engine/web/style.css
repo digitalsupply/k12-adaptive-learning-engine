@@ -78,6 +78,38 @@ svg:active { cursor: grabbing; }
 .actions { display: flex; gap: 8px; margin: 10px 0 4px; }
 .feedback { font-size: 12.5px; min-height: 18px; margin-top: 6px; }
 .feedback .up { color: var(--green); } .feedback .down { color: var(--red); }
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.primary:hover { background: var(--accent); color: #fff; }
+
+/* ---------------- 出题 ---------------- */
+.quiz-slot { margin: 10px 0; }
+.quiz { border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  background: #fbfdff; border-radius: 8px; padding: 10px 12px; }
+.quiz-kind { font-size: 11px; color: var(--muted); letter-spacing: .5px; }
+.quiz-prompt { font-size: 13.5px; font-weight: 600; margin: 4px 0 8px;
+  line-height: 1.55; white-space: pre-wrap; }
+.quiz-options { display: flex; flex-direction: column; gap: 6px; }
+.qopt { display: flex; gap: 8px; align-items: flex-start; text-align: left;
+  line-height: 1.5; padding: 7px 10px; width: 100%; }
+.qopt:disabled { cursor: default; opacity: 1; }
+.qopt .qletter { font-weight: 700; color: var(--muted); min-width: 14px; }
+.qopt.q-right { border-color: var(--green); background: #f0fbf4; color: var(--green); }
+.qopt.q-right .qletter { color: var(--green); }
+.qopt.q-wrong { border-color: var(--red); background: #fdf2f1; color: var(--red); }
+.qopt.q-wrong .qletter { color: var(--red); }
+.quiz-none { font-size: 12.5px; color: #b9770e; background: #fff8e8;
+  border: 1px solid #f0dfb0; border-radius: 6px; padding: 8px 10px; }
+.qr { margin-top: 8px; font-size: 12.5px; line-height: 1.6; }
+.qr .qr-head { font-weight: 600; margin-bottom: 4px; }
+.qr .qr-head.ok { color: var(--green); } .qr .qr-head.bad { color: var(--red); }
+.qr-explain { padding: 7px 9px; background: #f7f9fb; border-radius: 6px;
+  border: 1px solid var(--line); white-space: pre-wrap; }
+.qr-mis { margin-top: 6px; padding: 7px 9px; background: #fff8e8;
+  border: 1px solid #f0dfb0; border-radius: 6px; color: #8a5b00; }
+.qr-diag { margin-top: 6px; color: var(--muted); }
+.selfassess { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.selfassess summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.selfassess .tiny { margin: 4px 0 0; }
 
 .stage { margin: 8px 0; }
 .stage .hd { font-size: 12px; color: var(--accent); font-weight: 600; margin-bottom: 4px; }

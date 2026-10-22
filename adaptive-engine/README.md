@@ -9,6 +9,7 @@ adaptive-engine/
 │   ├── dataset.py        数据集懒加载（按学段×科目）+ 全局 ID 索引 + 派生索引缓存
 │   ├── graph.py          先修 DAG：拓扑序、祖先回溯、分层、枢纽识别、环检测
 │   ├── mastery.py        MasteryModel 接口 + BKT / Elo 两个实现（可插拔）
+│   ├── quiz.py           题目生成：正确说法 / 常见误区 → 选择题与判断题
 │   ├── diagnose.py       错题归因：沿先修链回溯 + 贪心集合覆盖找根因
 │   ├── planner.py        路径规划：先修闭包 → 剔除已掌握 → 分阶段输出
 │   ├── review.py         SM-2 变体复习调度
@@ -22,7 +23,7 @@ adaptive-engine/
 ├── figures/              交互图形（离线构建的静态 HTML/SVG）
 │   ├── registry.json     图形注册表：知识点 UUID → 图形
 │   └── ohm-lab/          欧姆定律实验台（model / geom / live / build）
-├── tests/                60 个测试：合成图单测 + 真实数据集端到端 + 图形注册表 + 回归
+├── tests/                79 个测试：合成图单测 + 真实数据集端到端 + 出题器 + 图形注册表 + 回归
 ├── pyproject.toml        pytest 配置（pythonpath，任意目录可跑）
 └── data/                 运行时目录（students/ 学生档案、cache/ 派生索引，均已 gitignore）
 ```
@@ -80,6 +81,33 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   接口层、规划器、归因器用的是同一个口径——此前 `elo_mastered_threshold` 是死配置，
   所有判断都落到了 0.85 上。
 
+### 出题：把标注变成可判分的题
+
+`annotations` 里每个知识点都带六个标注维度，其中两个直接可以出题：
+
+- `learningObjectives`（正确说法）→ 可作**正确答案**
+- `misconceptions`（常见误区）→ 可作**干扰项**
+- `assessability`（0~1）→ 低于 `quiz_min_assessability` 的知识点不出题
+
+两种题型（`ale/quiz.py`）：
+
+| 题型 | 题干 | 正确项 | 干扰项 |
+|---|---|---|---|
+| `choice`（70%） | 下列哪项说法是正确的？ | 一条 learningObjective | 2–3 条 misconception |
+| `judge`（30%） | 判断正误：某陈述 | 「说法正确」/「说法错误」 | — |
+
+**judge 题的陈述有一半来自误区（答案"错"）、一半来自正确目标（答案"对"）**，
+否则答案恒定就能被猜中。答错时引擎会指出学生踩中的是哪一条误区：
+
+> 💡 你很可能持有这个误区：**记混 tan30° 与 tan60° 的值（如 tan30°=√3）**
+
+题目由 `(kp_id, seed)` **确定性生成**，服务端不存题库——出题和判分都靠重新
+生成同一道题，所以不存在"客户端拿着答案来提交"的情况（下发接口也不返回
+`answer_index`）。
+
+数据覆盖：`learningObjectives` 和 `misconceptions` 在 33,765 个知识点上的
+覆盖率都是 99.8%，其中 81% 的 `assessability ≥ 0.7`。
+
 ### 错题归因：证据传播 + 贪心集合覆盖
 
 1. 症状 = 做错的知识点集；
@@ -113,6 +141,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | GET | `/api/config` | 前端阈值下发（掌握度阈值、置信度提示阈值…） |
 | GET | `/api/search?q=&band=&subject=` | 知识点搜索 |
 | GET | `/api/kp/{id}?student=` | 详情（目标/误区/先修链/掌握度） |
+| GET | `/api/quiz/{id}?seed=` | 出一道题（响应不含答案） |
+| POST | `/api/students/{sid}/answer` | 提交作答 `{kp_id, seed, choice}` → 判分 + 写掌握度 + 答错归因 |
 | GET | `/api/graph/{band}/{subject}?student=&depth=&root=&spine=&max_nodes=` | 图谱可视化数据（支持按范围收窄，见下） |
 | POST | `/api/students` | 建学生 `{name, model}` |
 | POST | `/api/students/{sid}/attempt` | 记录作答 `{kp_id, correct}`（答错自动归因） |
@@ -240,13 +270,15 @@ node --test figures/ohm-lab/model.test.mjs   # 10 个模型断言
 
 - 学生状态存 JSON 文件（已加原子写 + 文件锁），适合单机演示；
   生产应换 SQLite/Postgres——文件锁只能防丢更新，防不住跨机部署。
+- **题目是模板生成的**，不是真人题库：题干由知识点名 + 标注拼装，测的是
+  "能不能识别出哪条是误区"，而不是计算与推理。真正的计算题需要接外部题库。
 - 交互图形目前只有「欧姆定律实验台」一个，注册表可继续扩展；
   图形产物需要手工执行 `node figures/ohm-lab/build.mjs` 重建（不进 CI）。
 - 关系不跨学科不跨学段（数据集本身如此），跨科归因暂不支持。
 - 高中知识点 `grades` 常为空，展示层回退到教材模块名。
 - 估时、推荐权重均为可解释的启发式，未用真实作答数据校准——这正是骨架留白：
-  接入真实题库后，用 `assessability` 字段筛可出题的知识点，把 `misconceptions`
-  变成干扰项，即可闭环成完整的自适应练习系统。
+  接入真实题库后，把 `misconceptions` 变成干扰项的做法可以保留，但题干要从
+  模板生成换成真人命题。
 - Elo 的能力分与胜率虽然已分开存放，但能力分仍以 `p_mastery` 的比例做持久化
   兼容层；接入真实数据后建议给 Elo 单独的 state schema。
 - CORS 默认放开（本地演示用）；部署到公网请设 `K12_CORS_ORIGINS`

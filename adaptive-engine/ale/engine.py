@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from . import diagnose as _diagnose
 from . import planner as _planner
+from . import quiz as _quiz
 from . import review as _review
 from .config import Config, DEFAULT
 from .dataset import Dataset
@@ -159,6 +161,50 @@ class AdaptiveEngine:
             goal_id = None
         return _planner.next_best(graph, student, self.model_for(student),
                                   now, goal_id, top_n, self.config)
+
+    # ---------------- 出题 / 作答
+
+    def make_question(self, kp_id: str, seed: int = 0,
+                      prefer: str | None = None) -> _quiz.Question:
+        """为某个知识点出一道题（确定性：同 kp_id + seed → 同一道题）。"""
+        kp = self.dataset.get_kp(kp_id)
+        return _quiz.generate(kp, seed=seed, prefer=prefer,
+                              min_assessability=self.config.quiz_min_assessability)
+
+    def answer_question(self, sid: str, kp_id: str, seed: int, choice: int,
+                        now: float | None = None) -> dict[str, Any]:
+        """提交作答：服务端重新生成题目并判分，然后写入掌握度。
+
+        题目不存服务端，靠 (kp_id, seed) 确定性重建，所以不存在"客户端拿着
+        答案来提交"的问题——选项顺序也是服务端定的。
+        """
+        now = now or time.time()
+        question = self.make_question(kp_id, seed=seed)
+        if not (0 <= choice < len(question.options)):
+            raise ValueError(f"选项越界：{choice}")
+
+        correct = choice == question.answer_index
+        result = self.record_attempt(sid, kp_id, correct, now)
+
+        out: dict[str, Any] = {
+            "kp_id": kp_id,
+            "kp_name": question.kp_name,
+            "correct": correct,
+            "choice": choice,
+            "correct_index": question.answer_index,
+            "correct_option": question.options[question.answer_index],
+            "explain": question.explain,
+            "objective": question.objective,
+            "misconception": question.misconception,
+            "p_before": round(result.p_before, 3),
+            "p_after": round(result.p_after, 3),
+            "mastered": result.mastered,
+            "kind": question.kind,
+        }
+        if not correct:
+            d = self.diagnose(sid, [kp_id], now)
+            out["diagnosis"] = d.to_dict()["root_causes"][:3]
+        return out
 
     def due_reviews(self, sid: str, now: float | None = None):
         now = now or time.time()
