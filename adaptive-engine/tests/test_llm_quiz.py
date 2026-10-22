@@ -13,7 +13,7 @@ from ale import quiz
 from ale.config import Config
 from ale.dataset import KnowledgePoint
 from ale.llm import LLMConfig, LLMError, LLMClient, parse_json_block
-from ale.engine import AdaptiveEngine, QHashMismatch
+from ale.engine import AdaptiveEngine, QHashMismatch, _AnswerBank
 
 
 # ---------------- 桩件 ----------------
@@ -233,3 +233,46 @@ def test_real_engine_out_of_range_choice(engine):
     sid = engine.create_student("越界qhash").id
     with pytest.raises(ValueError):
         engine.answer_question(sid, kp.id, 1, 9)
+
+
+# ---------------- 答案库：出题缓存丢失后照样判分 ----------------
+
+def test_answer_bank_roundtrip(tmp_path):
+    bank = _AnswerBank(tmp_path / "question_bank.jsonl")
+    q = quiz.Question(kp_id="kp1", kp_name="性质应用", seed=1, kind="choice",
+                      prompt="题干 $\\sqrt{2}$", options=["甲", "乙", "丙", "丁"],
+                      answer_index=1, explain="解析文字", source="llm",
+                      model="stub-1")
+    bank.put(q)
+    bank.put(q)                                   # 重复 put 不重复落盘
+    assert len((tmp_path / "question_bank.jsonl").read_text(
+        encoding="utf-8").splitlines()) == 1
+    row = bank.get(q.qhash)
+    assert row["answer_index"] == 1 and row["explain"] == "解析文字"
+    assert bank.get("不存在") is None
+    # 重新加载（模拟重启）：数据不丢
+    bank2 = _AnswerBank(tmp_path / "question_bank.jsonl")
+    assert bank2.get(q.qhash)["answer_index"] == 1
+
+
+def test_answer_bank_scores_when_cache_lost(engine):
+    """出题缓存被清 → 重建退回模板 → qhash 变；答案库兜住判分与解析。"""
+    kps, _ = engine.dataset.group("初中", "数学")
+    kp = next(k for k in kps.values() if quiz.can_ask(k))
+    sid = engine.create_student("答案库兜底").id
+    jhash = "f00dfeed12345678"                    # 16 位十六进制，模拟真实 qhash
+    engine._qbank.rows[jhash] = {
+        "qhash": jhash, "kp_id": kp.id, "seed": 77, "model": "stub-1",
+        "answer_index": 2, "explain": "由性质 $(\\sqrt{a})^2=a$ 可知……",
+        "objective": None, "misconception": "以为可以直接开方负数",
+        "kind": "choice", "saved_ts": 0,
+    }
+    r = engine.answer_question(sid, kp.id, 77, 2, qhash=jhash)
+    assert r["correct"] is True
+    assert "性质" in r["explain"]
+    r2 = engine.answer_question(sid, kp.id, 77, 0, qhash=jhash)
+    assert r2["correct"] is False and r2["misconception"]
+
+    # 答案库也没有的 qhash → 才是真正题目刷新，409
+    with pytest.raises(QHashMismatch):
+        engine.answer_question(sid, kp.id, 78, 0, qhash="0123456789abcdef")

@@ -672,6 +672,22 @@ function renderKpCard(d) {
 function kv(title, inner) { return `<div class="kv"><b>${title}</b><ul>${inner}</ul></div>`; }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
+/* 题面/解析里的 $...$、\(..\)、\[..\] 渲染成真正的数学公式（KaTeX 本地内置）。
+   throwOnError=false：个别写错的公式退回原样显示，不让整题白屏。 */
+function renderMath(el) {
+  if (el && window.renderMathInElement) {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false },
+      ],
+      throwOnError: false,
+    });
+  }
+}
+
 /* ---------------- 出题 / 作答 ---------------- */
 
 /* 出一道题。题目由服务端按 (kp_id, seed) 确定性生成，判分也在服务端，
@@ -681,6 +697,8 @@ async function askQuestion() {
   const slot = $("quizSlot");
   const btn = $("btnAsk");
   btn.disabled = true;
+  slot.innerHTML = `<div class="quiz-none quiz-loading"><span class="spinner"></span>` +
+    `正在出题… AI 命题约需 10~40 秒，同一题之后秒回</div>`;
   try {
     const seed = Math.floor(Math.random() * 1e6);
     const q = await api(`/api/quiz/${encodeURIComponent(state.selected)}?seed=${seed}`);
@@ -720,6 +738,7 @@ function renderQuiz() {
   slot.querySelectorAll(".qopt").forEach(b => {
     b.onclick = () => submitAnswer(Number(b.dataset.choice));
   });
+  renderMath(slot);
 }
 
 async function submitAnswer(choice) {
@@ -740,9 +759,10 @@ async function submitAnswer(choice) {
     showError(e.message);
     q.answered = false;
     if (/409|刷新/.test(e.message)) {
-      // 题目在下发与作答之间被服务端刷新（缓存清理/换模型）→ 重新抽一题
+      // 题面与判分对不上（缓存被清、答案库也没这道题）→ 自动换一题，
+      // 不再让用户自己去点「换一题」
       state.quiz = null;
-      slot.innerHTML = `<div class="quiz-none">题目已更新，请点「换一题」重新作答。</div>`;
+      await askQuestion();
     } else {
       renderQuiz();
     }
@@ -775,6 +795,7 @@ function showQuizResult(r, q) {
       `</div>`);
   }
   slot.insertAdjacentHTML("beforeend", `<div class="qr">${lines.join("")}</div>`);
+  renderMath(slot.querySelector(".qr:last-child"));
 }
 
 /* ---------------- 自评（没有题目时的弱证据） ---------------- */

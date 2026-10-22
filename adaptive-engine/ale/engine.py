@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,11 +58,61 @@ def _make_store(config: Config):
     return store
 
 
+class _AnswerBank:
+    """AI 题目的「答案索引」：qhash → 答案 / 解析 / 误区，落盘 data/question_bank.jsonl。
+
+    LLM 题的答案只存在于生成那一次调用，出题缓存是唯一真相；万一缓存被清，
+    判分重建就只能退回模板，qhash 必然失配，把学生答对的题判成「题目已刷新」。
+    这里把每道 AI 题的判分所需信息按 qhash 持久化，判分时缓存缺失也能先查这里，
+    保证学生答完一定看到解析而不是报错。
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.rows: dict[str, dict[str, Any]] = {}
+        if path.exists():
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict) and row.get("qhash"):
+                        self.rows[row["qhash"]] = row
+            except OSError:
+                pass
+
+    def put(self, q: _quiz.Question) -> None:
+        row = {
+            "qhash": q.qhash, "kp_id": q.kp_id, "seed": q.seed,
+            "model": q.model, "answer_index": q.answer_index,
+            "explain": q.explain, "objective": q.objective,
+            "misconception": q.misconception, "kind": q.kind,
+            "saved_ts": round(time.time()),
+        }
+        old = self.rows.get(row["qhash"])
+        if old == row:
+            return
+        self.rows[row["qhash"]] = row
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as e:
+            print(f"[answer-bank] 写入失败：{e}", flush=True)
+
+    def get(self, qhash: str) -> dict[str, Any] | None:
+        return self.rows.get(qhash)
+
+
 class AdaptiveEngine:
     def __init__(self, config: Config | None = None):
         self.config = config or DEFAULT
         self.dataset = Dataset(self.config)
         self.store = _make_store(self.config)
+        self._qbank = _AnswerBank(self.config.db_path.parent / "question_bank.jsonl")
         self.llm = LLMClient(LLMConfig.from_env())
         self._graphs: dict[tuple[str, str], KnowledgeGraph] = {}
 
@@ -215,6 +266,8 @@ class AdaptiveEngine:
         if prefer:                  # 强制题型（测试用）
             q = _quiz.generate(kp, seed=seed, prefer=prefer,
                                min_assessability=self.config.quiz_min_assessability)
+        if q.source in ("llm", "llm-cache"):
+            self._qbank.put(q)      # AI 题答案落库，判分兜底用
         return q
 
     def answer_question(self, sid: str, kp_id: str, seed: int, choice: int,
@@ -223,10 +276,52 @@ class AdaptiveEngine:
         """提交作答：服务端重建题目 → 核对选项哈希 → 判分 → 写掌握度。
 
         题目不存服务端，靠 (kp_id, seed) 从出题缓存重建；qhash 由前端随答案
-        带回，防止题目在两次请求之间被刷新（缓存被清/模型换了）却仍按旧题判分。
+        带回，防止题目在两次请求之间被刷新却仍按旧题判分。
+        重建失败（缓存被清/换了模型）时先查答案库（qhash → 答案 + 解析）；
+        答案库也没有，才是真正的题目刷新，报 409 让前端重新抽题。
         """
-        now = now or time.time()
-        question = self.make_question(kp_id, seed=seed, for_answer=True)
+        now = time.time() if now is None else now
+        question = fallback = None
+        if qhash is not None:
+            fallback = self._qbank.get(qhash)
+            # qhash 绑定 (kp_id, seed, options)，这里只做双保险
+            if fallback is not None and (fallback.get("kp_id") != kp_id
+                                         or int(fallback.get("seed", -1)) != seed):
+                fallback = None
+        try:
+            question = self.make_question(kp_id, seed=seed, for_answer=True)
+        except _quiz.NoQuestionError:
+            if fallback is None:
+                raise
+        if fallback is not None and (question is None or question.qhash != qhash):
+            # 缓存缺失/失配，但答案库有这道题 → 按库判分，解析照样给足
+            kp = self.dataset.get_kp(kp_id)
+            if not (0 <= choice < 4):
+                raise ValueError(f"选项越界：{choice}")
+            correct = choice == fallback["answer_index"]
+            result = self.record_attempt(sid, kp_id, correct, now)
+            out: dict[str, Any] = {
+                "kp_id": kp_id,
+                "kp_name": kp.name,
+                "correct": correct,
+                "choice": choice,
+                "correct_index": fallback["answer_index"],
+                "correct_option": None,      # 题面已不在，前端只标对错字母
+                "explain": fallback.get("explain") or "（解析缺失）",
+                "objective": fallback.get("objective"),
+                "misconception": fallback.get("misconception"),
+                "source": "llm-cache",
+                "p_before": round(result.p_before, 3),
+                "p_after": round(result.p_after, 3),
+                "mastered": result.mastered,
+                "kind": fallback.get("kind", "choice"),
+            }
+            if not correct:
+                d = self.diagnose(sid, [kp_id], now)
+                out["diagnosis"] = d.to_dict()["root_causes"][:3]
+            return out
+        if question is None:
+            raise _quiz.NoQuestionError(f"该知识点无法重建题目：{kp_id}")
         if qhash is not None and question.qhash != qhash:
             raise QHashMismatch("题目已刷新，请重新获取再作答")
         if not (0 <= choice < len(question.options)):
