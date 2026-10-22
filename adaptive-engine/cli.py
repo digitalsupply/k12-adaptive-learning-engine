@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from ale.engine import AdaptiveEngine
-from ale.planner import plan as _plan  # noqa: F401 (类型引用)
 
 eng = AdaptiveEngine()
 
@@ -30,9 +30,20 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
+def _pad(text: str, width: int) -> str:
+    """按显示宽度补齐（中文算 2 列），避免依赖全角空格做填充字符。"""
+    def width_of(s: str) -> int:
+        return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
+    out = text
+    while width_of(out) < width:
+        out += " "
+    return out
+
+
 def cmd_groups(_a):
     for g in eng.dataset.list_groups():
-        print(f"{g['band']:　<3} {g['subject']:　<4}  知识点 {g['kp_count']:>5}  关系 {g['relation_count']:>5}")
+        print(f"{_pad(g['band'], 6)} {_pad(g['subject'], 8)}"
+              f"  知识点 {g['kp_count']:>5}  关系 {g['relation_count']:>5}")
 
 
 def cmd_search(a):
@@ -99,9 +110,10 @@ def cmd_simulate(a):
     band, subject = groups[0]
     kps, _ = eng.dataset.group(band, subject)
     import random
-    random.seed(a.seed)
-    picks = random.sample(sorted(kps), min(a.n, len(kps)))
-    results = eng.simulate_learner(a.sid, picks, ability=a.ability, noise=a.noise)
+    rng = random.Random(a.seed)
+    picks = rng.sample(sorted(kps), min(a.n, len(kps)))
+    results = eng.simulate_learner(a.sid, picks, ability=a.ability, noise=a.noise,
+                                   seed=a.seed)
     ok = sum(1 for r in results if r.correct)
     mastered = sum(1 for r in results if r.mastered)
     print(f"模拟完成：{band}/{subject}  共 {len(results)} 题，正确 {ok}，新掌握 {mastered}")
@@ -158,12 +170,22 @@ def cmd_reviews(a):
         print(f"  · {kp.name}  间隔 {r.interval_days:.0f} 天  第 {r.reps} 次复习")
 
 
+def cmd_prebuild_index(_a):
+    """预热派生索引（id→分组、名称→id），避免首次请求时全量扫描数据集。"""
+    src = eng.dataset.rebuild_indexes()
+    cache_dir = eng.config.cache_dir
+    print(f"索引已重建（来源：{src}），缓存目录：{cache_dir}")
+    for f in sorted(Path(cache_dir).glob("*.json")):
+        print(f"  {f.name}  {f.stat().st_size / 1024:.0f} KB")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("groups").set_defaults(fn=cmd_groups)
+    sub.add_parser("prebuild-index").set_defaults(fn=cmd_prebuild_index)
 
     p = sub.add_parser("search"); p.add_argument("keyword")
     p.add_argument("--band"); p.add_argument("--subject"); p.add_argument("--limit", type=int, default=15)

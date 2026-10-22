@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from .dataset import KnowledgePoint
-from .mastery import MasteryModel
 from .state import ReviewItem, Student
 
 _MIN_EASE = 1.3

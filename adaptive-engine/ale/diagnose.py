@@ -93,11 +93,12 @@ def diagnose(
         # （无需特殊处理，贪心时用 score 已能体现）
 
     # ---- 2. 打分：弱掌握 + 高证据的节点优先
+    mastered = config.mastered_for(model.name)
     scores: dict[str, float] = {}
     for aid, items in evidence.items():
         kp = graph.kps[aid]
         p = model.p(student.state_of(aid), kp, now)
-        if p >= config.mastered_threshold:
+        if p >= mastered:
             continue  # 掌握良好的节点不可能是根因
         scores[aid] = sum(w for _, _, w in items)
 

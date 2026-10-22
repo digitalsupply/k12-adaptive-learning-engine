@@ -84,8 +84,43 @@ split/                  # 按学段×科目拆分（推荐使用，单文件 190
 
 教材来源：国家中小学智慧教育平台（公开教育资源服务平台）逐页预览图，经 OCR 转录为正文后抽取。
 
+---
+
+# adaptive-engine · 自适应学习引擎
+
+本仓库除数据集外，还包含一个基于它的**自适应学习引擎**（`adaptive-engine/`）：
+
+> **知识点先修图谱 + 掌握度建模（BKT/Elo）+ 错题归因 + 分阶段学习路径规划 + 复习调度**
+
+```
+adaptive-engine/
+├── ale/         引擎核心包（数据集/图谱/掌握度/归因/规划/复习/持久化）
+├── cli.py       命令行入口
+├── server.py    FastAPI 服务 + 托管前端
+├── web/         单页前端（SVG 图谱交互，无框架依赖）
+├── figures/     交互图形（欧姆定律实验台，离线构建的静态 HTML）
+└── tests/       61 个测试
+```
+
+快速开始：
+
+```bash
+cd adaptive-engine
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pytest tests/ -q      # 61 个测试
+.venv/bin/python cli.py groups            # 学段 × 科目清单
+.venv/bin/python server.py                # http://localhost:8000
+```
+
+数据集默认从本仓库的 `split/` 加载，也可用环境变量 `K12_DATA_DIR` 指向别处。
+
+完整说明见 **[adaptive-engine/README.md](adaptive-engine/README.md)**。
+
+---
+
 ## 作者与许可证
 
-本系统由云一工作室主理人 **猫叔** 独立开发。仓库地址：https://github.com/mmlong818/k12-knowledge-points
+数据集由云一工作室主理人 **猫叔** 独立开发（原仓库：https://github.com/mmlong818/k12-knowledge-points）；
+自适应学习引擎由 **digitalsupply** 开发。
 
 许可证：[PolyForm Noncommercial 1.0.0](./LICENSE)——允许个人使用、学习、修改。

@@ -2,4 +2,5 @@
 __pycache__/
 *.pyc
 data/students/
+data/cache/
 .pytest_cache/

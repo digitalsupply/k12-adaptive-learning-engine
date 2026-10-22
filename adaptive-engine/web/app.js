@@ -22,6 +22,9 @@ const state = {
   selected: null, rootCauses: new Set(), planNodes: new Set(),
   pos: {}, view: null,
   kpDetail: null, figure: null, figureBusy: false,
+  scope: "all",            // all | depth3 | depth5 | depth8 | focus
+  focusRoot: null,         // 聚焦模式的根节点
+  cfg: { mastered_threshold: 0.85, low_confidence_hint: 0.6 },
 };
 let loadSeq = 0;   // 请求序号：丢弃过期响应，避免竞态
 
@@ -37,6 +40,8 @@ function showError(msg) {
 
 async function init() {
   state.groups = await api("/api/groups");
+  // 阈值由后端下发，避免前后端各写一份魔法数字
+  try { state.cfg = await api("/api/config"); } catch (_) { /* 保留默认值 */ }
   const bands = [...new Set(state.groups.map(g => g.band))];
   fillSelect($("bandSel"), bands);
   state.band = bands.includes("初中") ? "初中" : bands[0];
@@ -53,10 +58,11 @@ async function init() {
   $("bandSel").onchange = () => {
     closeFigure();
     state.band = $("bandSel").value;
+    resetFocus();
     refreshSubjectOptions();
     loadGraph();
   };
-  $("subjectSel").onchange = () => { closeFigure(); state.subject = $("subjectSel").value; loadGraph(); };
+  $("subjectSel").onchange = () => { closeFigure(); state.subject = $("subjectSel").value; resetFocus(); loadGraph(); };
   $("studentSel").onchange = () => { closeFigure(); state.student = $("studentSel").value; loadGraph(); };
   $("newStudentBtn").onclick = async () => {
     const name = prompt("学生姓名：", "学生" + (Date.now() % 1000));
@@ -72,6 +78,22 @@ async function init() {
   };
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
+  $("scopeSel").onchange = async (e) => {
+    state.scope = e.target.value;
+    if (state.scope !== "focus") state.focusRoot = null;
+    $("clearScopeBtn").classList.toggle("hidden", state.scope !== "focus");
+    if (state.scope === "focus") {
+      if (!state.selected) { showError("先在图里选一个知识点再聚焦"); state.scope = "all"; e.target.value = "all"; $("clearScopeBtn").classList.add("hidden"); return; }
+      state.focusRoot = state.selected;
+    }
+    await loadGraph();
+  };
+  $("clearScopeBtn").onclick = async () => {
+    state.scope = "all"; state.focusRoot = null;
+    $("scopeSel").value = "all";
+    $("clearScopeBtn").classList.add("hidden");
+    await loadGraph();
+  };
   setupSearch();
   await loadGraph();
 }
@@ -91,14 +113,40 @@ function refreshSubjectOptions() {
   $("subjectSel").value = state.subject;
 }
 
+/* 换学段/科目后旧的聚焦根节点不再属于当前图，退回"全部"范围 */
+function resetFocus() {
+  if (state.scope !== "focus") return;
+  state.scope = "all"; state.focusRoot = null;
+  $("scopeSel").value = "all";
+  $("clearScopeBtn").classList.add("hidden");
+}
+
 /* ---------------- 图谱加载 ---------------- */
+
+/* 把当前范围设置翻译成 /api/graph 的查询参数。
+   大科目（小学语文 4851 节点）整图会拉 1.4 MB 并生成上万个 SVG 元素，
+   所以按层级或聚焦收窄，由服务端裁剪。 */
+function graphQuery() {
+  const q = new URLSearchParams();
+  if (state.student) q.set("student", state.student);
+  const depthByMode = { depth3: 3, depth5: 5, depth8: 8 };
+  if (depthByMode[state.scope] !== undefined) {
+    q.set("depth", String(depthByMode[state.scope]));
+  } else if (state.scope === "spine") {
+    q.set("spine", "true");
+  } else if (state.scope === "focus" && state.focusRoot) {
+    q.set("root", state.focusRoot);
+  }
+  return q.toString();
+}
 
 async function loadGraph() {
   if (!state.subject) return;
-  if (!state.student) { showError("尚未选择学生"); return; }   // 防止 student=null 请求
+  if (!state.student) { showError("尚未选择学生"); return;   // 防止 student=null 请求
+    }
   const seq = ++loadSeq;
   try {
-    const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?student=${encodeURIComponent(state.student)}`);
+    const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?${graphQuery()}`);
     if (seq !== loadSeq) return;                       // 过期响应直接丢弃
     state.graph = g;
     // 切换科目后原选中节点可能已不在图中
@@ -106,9 +154,12 @@ async function loadGraph() {
     state.rootCauses.clear(); state.planNodes.clear();
     state.view = null;                                  // 新图重新适配视口
     const s = g.stats;
+    const shown = g.nodes.length, edges = g.edges.length;
+    const cropped = g.truncated
+      ? `（共 ${g.total_nodes} 个知识点，已按范围裁剪）` : "";
     $("graphStats").textContent =
-      `${state.band}/${state.subject} · ${g.nodes.length} 知识点 · ${g.edges.length} 关系 · 最深 ${s.max_depth} 层` +
-      (s.cycles.length ? ` · ⚠ ${s.cycles.length} 处循环依赖` : "");
+      `${state.band}/${state.subject} · ${shown} 知识点 · ${edges} 关系 · 最深 ${s.max_depth} 层` +
+      cropped + (s.cycles.length ? ` · ⚠ ${s.cycles.length} 处循环依赖` : "");
     renderGraph();
     fitView(true);
     if (state.selected) selectKp(state.selected);
@@ -120,7 +171,7 @@ async function loadGraph() {
 
 function masteryColor(node) {
   if (!node.attempts) return "#95a5a6";        // 未作答
-  if (node.p >= 0.85) return "#27ae60";
+  if (node.p >= state.cfg.mastered_threshold) return "#27ae60";
   if (node.p >= 0.5) return "#f39c12";
   return "#e74c3c";
 }
@@ -157,7 +208,11 @@ function renderGraph() {
 
   // 边
   const edgeG = mk("g");
-  state.graph.edges.forEach(e => {
+  const edges = state.graph.edges;
+  // 边很多时只画主干（跳过 leads-to），否则上万个 path 会把浏览器拖垮
+  const drawLeads = edges.length <= 3000;
+  edges.forEach(e => {
+    if (!drawLeads && e.type === "leads-to") return;
     const a = pos[e.source], b = pos[e.target];
     if (!a || !b) return;
     const path = mk("path");
@@ -170,7 +225,13 @@ function renderGraph() {
 
   // 节点
   const nodeG = mk("g");
-  state.graph.nodes.forEach(n => {
+  const nodes = state.graph.nodes;
+  // 节点多时只给"有信息量"的节点画文字标签：已作答 / 选中 / 根因 / 路径内。
+  // 每个 <text> 都是一个 DOM 元素，5000 个节点时全画会明显卡顿。
+  const sparseLabels = nodes.length > 1200;
+  const labelFor = (n) => !sparseLabels || n.attempts ||
+    n.id === state.selected || state.rootCauses.has(n.id) || state.planNodes.has(n.id);
+  nodes.forEach(n => {
     const p = pos[n.id]; if (!p) return;
     const g = mk("g");
     let cls = "node";
@@ -193,10 +254,12 @@ function renderGraph() {
       (n.low_confidence ? " · 低置信度：仅按教材目录标题抽取" : "");
     g.appendChild(title);
 
-    const t = mk("text");
-    t.setAttribute("y", -14); t.setAttribute("text-anchor", "middle");
-    t.textContent = n.name.length > 9 ? n.name.slice(0, 8) + "…" : n.name;
-    g.appendChild(t);
+    if (labelFor(n)) {
+      const t = mk("text");
+      t.setAttribute("y", -14); t.setAttribute("text-anchor", "middle");
+      t.textContent = n.name.length > 9 ? n.name.slice(0, 8) + "…" : n.name;
+      g.appendChild(t);
+    }
     nodeG.appendChild(g);
   });
   svg.appendChild(nodeG);
@@ -335,7 +398,7 @@ function renderKpCard(d) {
   }
 
   let html = "";
-  if (d.confidence < 0.6) {
+  if (d.confidence < (state.cfg.low_confidence_hint ?? 0.6)) {
     html += `<div class="kv" style="color:#b9770e">⚠ 低置信度条目（${(d.confidence * 100).toFixed(0)}%）：仅按教材目录标题抽取，缺少教材正文，建议人工核对后再用于教学。</div>`;
   }
   if (m && m.mastered) html += `<div class="kv" style="color:var(--green)">✅ 已掌握</div>`;
@@ -501,7 +564,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function refreshGraphData() {
-  const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?student=${encodeURIComponent(state.student)}`);
+  const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?${graphQuery()}`);
   state.graph = g;
   renderGraph();
 }

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -19,7 +20,13 @@ from ale.engine import AdaptiveEngine
 from ale.figures import FigureRegistry
 
 app = FastAPI(title="K12 自适应学习引擎", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS 默认放开（本地演示）；部署到公网时用 K12_CORS_ORIGINS 指定来源列表。
+_cors = os.environ.get("K12_CORS_ORIGINS", "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors.split(",") if o.strip()],
+    allow_methods=["*"], allow_headers=["*"],
+)
 
 eng = AdaptiveEngine()
 figures = FigureRegistry()
@@ -30,6 +37,10 @@ figures = FigureRegistry()
 class AttemptIn(BaseModel):
     kp_id: str
     correct: bool
+
+
+class AttemptsIn(BaseModel):
+    attempts: list[AttemptIn] = Field(..., min_length=1, max_length=5000)
 
 
 class DiagnoseIn(BaseModel):
@@ -49,6 +60,7 @@ class SimulateIn(BaseModel):
     kp_ids: list[str]
     ability: float = 0.6
     noise: float = 0.15
+    seed: int | None = None
 
 
 # ---------------- 元数据
@@ -56,6 +68,20 @@ class SimulateIn(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+def get_config() -> dict[str, Any]:
+    """把阈值下发给前端，避免前后端各写一份魔法数字。"""
+    cfg = eng.config
+    return {
+        "mastered_threshold": cfg.mastered_for("bkt"),
+        "elo_mastered_threshold": cfg.mastered_for("elo"),
+        "low_confidence_hint": cfg.low_confidence_hint,
+        "diag_max_depth": cfg.diag_max_depth,
+        "diag_decay": cfg.diag_decay,
+        "plan_max_nodes": cfg.plan_max_nodes,
+    }
 
 
 @app.get("/api/groups")
@@ -91,8 +117,20 @@ def list_figures() -> list[dict[str, Any]]:
 
 
 @app.get("/api/graph/{band}/{subject}")
-def graph_view(band: str, subject: str, student: str | None = None) -> dict[str, Any]:
-    """图谱可视化数据：节点（含掌握度着色）+ 边。学生指定时节点带 p。"""
+def graph_view(band: str, subject: str, student: str | None = None,
+               depth: int | None = None, root: str | None = None,
+               max_nodes: int | None = None,
+               spine: bool = False) -> dict[str, Any]:
+    """图谱可视化数据：节点（含掌握度着色）+ 边。学生指定时节点带 p。
+
+    大科目（小学语文 4851 个知识点）整图返回会产生 1.4 MB 响应和上万个
+    SVG 元素，前端明显卡顿。因此提供几个收窄参数：
+    - depth: 只保留深度 ≤ N 的节点；
+    - root: 只保留该节点所在连通分量（先修 + 后继双向可达）；
+    - spine: 只保留参与先修关系的节点（丢掉没有先修也没有后继的孤立条目）；
+    - max_nodes: 节点数硬上限，优先保留参与先修关系的节点。
+    响应里的 truncated / total_nodes / total_edges 告诉前端是否被裁剪。
+    """
     try:
         g = eng.graph(band, subject)
     except KeyError as e:
@@ -105,8 +143,46 @@ def graph_view(band: str, subject: str, student: str | None = None) -> dict[str,
         except KeyError:
             raise HTTPException(404, f"学生不存在：{student}")
     model = eng.model_for(student_obj) if student_obj else None
+
+    total_nodes, total_edges = len(g.kps), len(g.relations)
+
+    def has_rel(kid: str) -> bool:
+        return bool(g.prereq_of.get(kid)) or bool(g.dependents_of.get(kid))
+
+    # ---- 收窄：先修 + 后继双向可达的连通分量
+    keep: set[str] | None = None
+    if root:
+        if root not in g.kps:
+            raise HTTPException(404, f"知识点不存在：{root}")
+        keep = _connected_component(g, root)
+
+    # ---- 收窄：深度上限
+    if depth is not None:
+        depth = max(0, depth)
+        dset = {kid for kid in g.kps if g.depth(kid) <= depth}
+        keep = dset if keep is None else (keep & dset)
+
+    # ---- 收窄：只保留有先修关系的主干
+    if spine:
+        sset = {kid for kid in g.kps if has_rel(kid)}
+        keep = sset if keep is None else (keep & sset)
+
+    # ---- 收窄：节点上限
+    truncated = False
+    if max_nodes is not None and max_nodes >= 0:
+        pool = [k for k in g.topological_order() if keep is None or k in keep]
+        if len(pool) > max_nodes:
+            truncated = True
+            # 逐个取完整的连通分量：从大到小装，装不下的整块跳过。
+            # 按拓扑序截断会切出"一堆孤立点 + 一条边"的碎片，没有教学意义。
+            keep = _greedy_components(g, pool, max_nodes)
+        elif keep is None:
+            keep = set(pool)
+
     nodes = []
     for kid, kp in g.kps.items():
+        if keep is not None and kid not in keep:
+            continue
         node: dict[str, Any] = {
             "id": kid, "name": kp.name, "depth": g.depth(kid),
             "difficulty": kp.difficulty, "kp_type": kp.kp_type,
@@ -117,14 +193,70 @@ def graph_view(band: str, subject: str, student: str | None = None) -> dict[str,
             p = model.p(st, kp, now)
             node["p"] = round(p, 3)
             node["attempts"] = st.attempts
-            node["mastered"] = p >= eng.config.mastered_threshold
+            node["mastered"] = p >= eng.config.mastered_for(model.name)
         node["confidence"] = kp.confidence
         node["low_confidence"] = kp.confidence < eng.config.low_confidence_hint
         nodes.append(node)
+
     edges = [{"source": r.from_id, "target": r.to_id, "type": r.relation_type}
-             for r in g.relations]
+             for r in g.relations
+             if keep is None or (r.from_id in keep and r.to_id in keep)]
+    if len(nodes) < total_nodes:
+        truncated = True
     return {"band": band, "subject": subject, "nodes": nodes, "edges": edges,
-            "stats": g.stats(), "hubs": g.hubs(8)}
+            "stats": g.stats(), "hubs": g.hubs(8),
+            "total_nodes": total_nodes, "total_edges": total_edges,
+            "truncated": truncated}
+
+
+def _connected_component(g, root: str) -> set[str]:
+    """root 所在的连通分量（先修边 + 后继边都算，双向可达）。"""
+    seen = {root}
+    frontier = [root]
+    while frontier:
+        node = frontier.pop()
+        neighbours = g.prereq_of.get(node, set()) | g.dependents_of.get(node, set())
+        for nxt in neighbours:
+            if nxt not in seen:
+                seen.add(nxt)
+                frontier.append(nxt)
+    return seen
+
+
+def _connected_components(g) -> list[set[str]]:
+    """图的所有连通分量（先修边 + 后继边双向可达），按大小降序。"""
+    seen: set[str] = set()
+    comps: list[set[str]] = []
+    for kid in g.kps:
+        if kid in seen:
+            continue
+        comp = _connected_component(g, kid)
+        seen |= comp
+        comps.append(comp)
+    comps.sort(key=len, reverse=True)
+    return comps
+
+
+def _greedy_components(g, pool: list[str], max_nodes: int) -> set[str]:
+    """在 pool 里按连通分量从大到小取，直到装满 max_nodes。
+
+    装不下的整块跳过（宁缺毋滥），保证留下的子图内部是连贯的。
+    """
+    allowed = set(pool)
+    chosen: set[str] = set()
+    for comp in _connected_components(g):
+        part = comp & allowed          # 分量可能已被 depth/spine 裁过，只取交集
+        if not part:
+            continue
+        if len(chosen) + len(part) > max_nodes:
+            continue
+        chosen |= part
+        if len(chosen) >= max_nodes:
+            break
+    # 所有分量都装不下时，退回按拓扑序取（至少给用户一些内容）
+    if not chosen:
+        chosen = set(pool[:max_nodes])
+    return chosen
 
 
 # ---------------- 学生
@@ -158,7 +290,7 @@ def student_overview(sid: str) -> dict[str, Any]:
             kp = eng.dataset.get_kp(kid)
         except KeyError:
             continue
-        if model.p(st, kp, now) >= eng.config.mastered_threshold:
+        if model.p(st, kp, now) >= eng.config.mastered_for(model.name):
             mastered += 1
     return {"id": stu.id, "name": stu.name, "model": stu.model,
             "attempt_count": len(stu.attempts), "touched_kp": touched,
@@ -185,10 +317,26 @@ def record_attempt(sid: str, body: AttemptIn) -> dict[str, Any]:
     return out
 
 
+@app.post("/api/students/{sid}/attempts")
+def record_attempts(sid: str, body: AttemptsIn) -> dict[str, Any]:
+    """批量记录作答：整个批次只写一次档案（逐条记录是 O(n) 次磁盘写）。"""
+    try:
+        results = eng.record_attempts(sid, [(a.kp_id, a.correct) for a in body.attempts])
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"count": len(results),
+            "correct": sum(1 for r in results if r.correct),
+            "mastered": sum(1 for r in results if r.mastered),
+            "results": [{"kp_id": r.kp_id, "p_before": round(r.p_before, 3),
+                         "p_after": round(r.p_after, 3), "correct": r.correct,
+                         "mastered": r.mastered} for r in results]}
+
+
 @app.post("/api/students/{sid}/simulate")
 def simulate(sid: str, body: SimulateIn) -> dict[str, Any]:
     try:
-        results = eng.simulate_learner(sid, body.kp_ids, ability=body.ability, noise=body.noise)
+        results = eng.simulate_learner(sid, body.kp_ids, ability=body.ability,
+                                       noise=body.noise, seed=body.seed)
     except KeyError as e:
         raise HTTPException(404, str(e))
     return {"count": len(results),

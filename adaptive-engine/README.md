@@ -6,13 +6,13 @@
 ```
 adaptive-engine/
 ├── ale/                  引擎核心包
-│   ├── dataset.py        数据集懒加载（按学段×科目）+ 全局 ID 索引
+│   ├── dataset.py        数据集懒加载（按学段×科目）+ 全局 ID 索引 + 派生索引缓存
 │   ├── graph.py          先修 DAG：拓扑序、祖先回溯、分层、枢纽识别、环检测
 │   ├── mastery.py        MasteryModel 接口 + BKT / Elo 两个实现（可插拔）
 │   ├── diagnose.py       错题归因：沿先修链回溯 + 贪心集合覆盖找根因
 │   ├── planner.py        路径规划：先修闭包 → 剔除已掌握 → 分阶段输出
 │   ├── review.py         SM-2 变体复习调度
-│   ├── state.py          学生状态（作答历史/掌握度/复习队列）JSON 持久化
+│   ├── state.py          学生状态（作答历史/掌握度/复习队列）JSON 持久化（原子写 + 文件锁）
 │   ├── engine.py         AdaptiveEngine 门面（CLI 与 API 共用）
 │   ├── figures.py        交互图形注册表（知识点 UUID → 图形）
 │   └── config.py         全部可调参数（阈值/衰减/回溯深度…）
@@ -22,8 +22,9 @@ adaptive-engine/
 ├── figures/              交互图形（离线构建的静态 HTML/SVG）
 │   ├── registry.json     图形注册表：知识点 UUID → 图形
 │   └── ohm-lab/          欧姆定律实验台（model / geom / live / build）
-├── tests/                27 个测试：合成图单测 + 真实数据集端到端 + 图形注册表
-└── data/students/        学生档案（运行时生成，已 gitignore）
+├── tests/                60 个测试：合成图单测 + 真实数据集端到端 + 图形注册表 + 回归
+├── pyproject.toml        pytest 配置（pythonpath，任意目录可跑）
+└── data/                 运行时目录（students/ 学生档案、cache/ 派生索引，均已 gitignore）
 ```
 
 ## 快速开始
@@ -32,8 +33,11 @@ adaptive-engine/
 # 依赖（仓库根目录已建好 .venv，或自行 pip install -r requirements.txt）
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# 跑测试（含真实数据集冒烟）
+# 跑测试（含真实数据集冒烟）；pyproject.toml 里配了 pythonpath，任意目录可跑
 .venv/bin/python -m pytest tests/ -q
+
+# 预热派生索引（可选：首次请求会自动建，之后走缓存）
+.venv/bin/python cli.py prebuild-index
 
 # CLI 演示
 .venv/bin/python cli.py search 待定系数法 --band 初中
@@ -66,7 +70,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   低先验时会出现"答错反而涨掌握度"的反直觉结果（测试 `test_bkt_update_direction` 守住这一点）。
 - **Elo**：知识点难度映射为"题目分"，学生对每个知识点维护能力分，掌握概率即胜率；
   K 值随练习次数收敛。
+  *状态语义修正*：能力分与胜率分开存放（`MasteryState.ability`）。旧实现把胜率
+  写进 `p_mastery`，下一次 `update()` 又把它当能力分乘一遍 span，能力估计系统性
+  偏低——"连对 10 次"的偏差达 8.6 个百分点。修复后 Elo 的学习轨迹与"能力分独立
+  存放"的标准写法逐位一致（测试 `test_elo_trajectory_matches_reference_implementation`）。
 - 两者都实现了指数遗忘（`decay`），参数在 `config.py`。
+- **阈值按模型分派**：BKT 用 `mastered_threshold`（0.85），Elo 用
+  `elo_mastered_threshold`（0.80）。走 `config.mastered_for(model.name)` 统一取，
+  接口层、规划器、归因器用的是同一个口径——此前 `elo_mastered_threshold` 是死配置，
+  所有判断都落到了 0.85 上。
 
 ### 错题归因：证据传播 + 贪心集合覆盖
 
@@ -98,18 +110,51 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/groups` | 学段×科目清单 |
+| GET | `/api/config` | 前端阈值下发（掌握度阈值、置信度提示阈值…） |
 | GET | `/api/search?q=&band=&subject=` | 知识点搜索 |
 | GET | `/api/kp/{id}?student=` | 详情（目标/误区/先修链/掌握度） |
-| GET | `/api/graph/{band}/{subject}?student=` | 图谱可视化数据 |
+| GET | `/api/graph/{band}/{subject}?student=&depth=&root=&spine=&max_nodes=` | 图谱可视化数据（支持按范围收窄，见下） |
 | POST | `/api/students` | 建学生 `{name, model}` |
 | POST | `/api/students/{sid}/attempt` | 记录作答 `{kp_id, correct}`（答错自动归因） |
+| POST | `/api/students/{sid}/attempts` | 批量记录作答 `{attempts:[{kp_id, correct}]}`（整批只写一次档案） |
+| POST | `/api/students/{sid}/simulate` | 模拟练习 `{kp_ids, ability, noise, seed}` |
 | POST | `/api/students/{sid}/diagnose` | 归因 `{kp_ids}` |
+| GET | `/api/students/{sid}/diagnose/recent` | 最近错题自动归因 |
 | POST | `/api/students/{sid}/plan` | 学习路径 `{goal_id}` |
 | GET | `/api/students/{sid}/recommend?goal=` | 推荐下一步 |
 | GET | `/api/students/{sid}/reviews` | 到期复习 |
 | GET | `/api/figures` | 已注册的交互图形清单 |
 | GET | `/figures/**` | 图形静态资源（构建产物） |
 | GET | `/api/kp/{id}` 里的 `figure` 字段 | 该知识点挂着的交互图形（没有则无此字段） |
+
+### 图谱范围收窄
+
+大科目整图太大（小学语文 4851 个知识点 → 1.4 MB 响应 + 上万个 SVG 元素），
+`/api/graph` 支持四个收窄参数，响应里的 `truncated / total_nodes / total_edges`
+告诉前端是否被裁剪：
+
+| 参数 | 含义 | 效果（小学语文）|
+|---|---|---|
+| `spine=true` | 只保留参与先修关系的节点 | 4851 → 2529 节点 |
+| `depth=N` | 只保留深度 ≤ N | 按层级过滤 |
+| `root=<kp_id>` | 只保留该节点所在连通分量 | 1683 → 14 节点（初中数学）|
+| `max_nodes=N` | 节点数上限，按连通分量从大到小装 | 800 节点 / 648 条边 |
+
+前端工具栏的「范围」下拉对应这些模式；节点超过 1200 个时只给有信息量的节点
+（已作答 / 选中 / 根因 / 路径内）画文字标签，避免 DOM 爆炸。
+
+## 性能与持久化
+
+- **派生索引缓存**：`kp_id → (学段, 科目)` 与 `名称/别名 → kp_id` 两个索引会落盘到
+  `data/cache/`，以 split 文件的 `(路径, 大小, mtime)` 指纹判断新鲜度，数据集变了
+  自动重建。冷启动 `locate()` 从 0.39 s 降到 0.015 s，搜索从 0.41 s / 157 MB 降到
+  0.17 s / 106 MB。`cli.py prebuild-index` 可手动预热。
+- **学生档案原子写**：先写同目录临时文件再 `os.replace` 覆盖，中途崩溃不会留下
+  半截 JSON；失败时清掉临时文件，原档案毫发无损。
+- **文件锁**：`StudentStore.mutate()` 在 `fcntl` 独占锁内完成「读-改-写」，
+  多 worker 并发作答不会互相覆盖（此前是裸的读-改-写，后写的那次会丢）。
+- **损坏档案降级**：`get()` 遇到坏 JSON 抛 `KeyError`（API 回 404 + 提示），
+  列表接口跳过坏档案，不会整个挂掉。
 
 
 ## 交互图形：欧姆定律实验台
@@ -145,6 +190,7 @@ node --test figures/ohm-lab/model.test.mjs   # 10 个模型断言
 ```
 
 构建产物是纯静态 HTML（浅色嵌入页约 280 kB），直接被 `/figures` 托管。
+构建产物可复现：同样输入重跑 `build.mjs`，产物逐字节一致。
 
 ### 注册表
 
@@ -192,7 +238,8 @@ node --test figures/ohm-lab/model.test.mjs   # 10 个模型断言
 
 ## 已知边界（骨架阶段）
 
-- 学生状态存 JSON 文件，适合单机演示；生产应换 SQLite/Postgres 并加并发控制。
+- 学生状态存 JSON 文件（已加原子写 + 文件锁），适合单机演示；
+  生产应换 SQLite/Postgres——文件锁只能防丢更新，防不住跨机部署。
 - 交互图形目前只有「欧姆定律实验台」一个，注册表可继续扩展；
   图形产物需要手工执行 `node figures/ohm-lab/build.mjs` 重建（不进 CI）。
 - 关系不跨学科不跨学段（数据集本身如此），跨科归因暂不支持。
@@ -200,6 +247,10 @@ node --test figures/ohm-lab/model.test.mjs   # 10 个模型断言
 - 估时、推荐权重均为可解释的启发式，未用真实作答数据校准——这正是骨架留白：
   接入真实题库后，用 `assessability` 字段筛可出题的知识点，把 `misconceptions`
   变成干扰项，即可闭环成完整的自适应练习系统。
+- Elo 的能力分与胜率虽然已分开存放，但能力分仍以 `p_mastery` 的比例做持久化
+  兼容层；接入真实数据后建议给 Elo 单独的 state schema。
+- CORS 默认放开（本地演示用）；部署到公网请设 `K12_CORS_ORIGINS`
+  （逗号分隔的来源列表）。
 
 ## License
 

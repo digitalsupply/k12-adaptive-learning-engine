@@ -9,7 +9,7 @@ from . import diagnose as _diagnose
 from . import planner as _planner
 from . import review as _review
 from .config import Config, DEFAULT
-from .dataset import Dataset, KnowledgePoint
+from .dataset import Dataset
 from .graph import KnowledgeGraph
 from .mastery import create_model
 from .state import Attempt, Student, StudentStore
@@ -65,29 +65,28 @@ class AdaptiveEngine:
                        now: float | None = None) -> AttemptResult:
         """记录一次作答，驱动掌握度 + 复习队列。"""
         now = now or time.time()
-        student = self.get_student(sid)
         kp = self.dataset.get_kp(kp_id)
-        model = self.model_for(student)
 
-        state = student.state_of(kp_id)
-        p_before = model.p(state, kp, now)
-        new_state = model.update(state, kp, correct, now)
-        p_after = new_state.p_mastery
-        student.mastery[kp_id] = new_state
-        student.attempts.append(Attempt(kp_id=kp_id, correct=correct, ts=now))
-        # 历史截断，防止 JSON 无限膨胀（骨架策略）
-        if len(student.attempts) > 5000:
-            student.attempts = student.attempts[-3000:]
+        def _apply(student: Student) -> AttemptResult:
+            model = self.model_for(student)
+            state = student.state_of(kp_id)
+            p_before = model.p(state, kp, now)
+            new_state = model.update(state, kp, correct, now)
+            p_after = new_state.p_mastery
+            student.mastery[kp_id] = new_state
+            student.attempts.append(Attempt(kp_id=kp_id, correct=correct, ts=now))
+            self._truncate_history(student)
+            item = _review.schedule_review(student, kp, correct, p_after, now)
+            return AttemptResult(
+                kp_id=kp_id, kp_name=kp.name, correct=correct,
+                p_before=p_before, p_after=p_after,
+                mastered=p_after >= self.config.mastered_for(model.name),
+                review_due_in_hours=item.due_ts / 3600 - now / 3600,
+            )
 
-        item = _review.schedule_review(student, kp, correct, p_after, now)
-        self.store.save(student)
-
-        return AttemptResult(
-            kp_id=kp_id, kp_name=kp.name, correct=correct,
-            p_before=p_before, p_after=p_after,
-            mastered=p_after >= self.config.mastered_threshold,
-            review_due_in_hours=item.due_ts / 3600 - now / 3600,
-        )
+        # 锁内完成读-改-写：并发作答不会互相覆盖
+        result, _ = self.store.mutate(sid, _apply)
+        return result
 
     def diagnose(self, sid: str, symptom_ids: list[str],
                  now: float | None = None) -> _diagnose.Diagnosis:
@@ -129,13 +128,18 @@ class AdaptiveEngine:
     def make_plan(self, sid: str, goal_id: str,
                   now: float | None = None) -> _planner.LearningPlan:
         now = now or time.time()
-        student = self.get_student(sid)
         graph = self.graph_of_kp(goal_id)
-        plan = _planner.plan(graph, student, self.model_for(student),
-                             goal_id, now, self.config)
-        # 记住目标，便于首页回访
-        student.current_goals[f"{graph.kps[goal_id].grade_band}/{graph.kps[goal_id].subject}"] = goal_id
-        self.store.save(student)
+
+        def _apply(student: Student) -> _planner.LearningPlan:
+            plan = _planner.plan(graph, student, self.model_for(student),
+                                 goal_id, now, self.config)
+            # 记住目标，便于首页回访
+            kp = graph.kps[goal_id]
+            student.current_goals[f"{kp.grade_band}/{kp.subject}"] = goal_id
+            return plan
+
+        # 锁内读-改-写：目标记忆不会与并发作答互相覆盖
+        plan, _ = self.store.mutate(sid, _apply)
         return plan
 
     def recommend(self, sid: str, goal_id: str | None = None,
@@ -194,20 +198,68 @@ class AdaptiveEngine:
             out["mastery"] = {
                 "p": round(model.p(st, kp, now), 3),
                 "attempts": st.attempts, "correct": st.correct,
-                "mastered": model.p(st, kp, now) >= self.config.mastered_threshold,
+                "mastered": model.p(st, kp, now) >= self.config.mastered_for(model.name),
             }
         return out
 
+    def record_attempts(self, sid: str, attempts: list[tuple[str, bool]],
+                        now: float | None = None) -> list[AttemptResult]:
+        """批量记录作答：整个批次只写一次档案。
+
+        逐条记录会让每次作答都触发一次全量 JSON 重写，批量导入时是 O(n) 次
+        磁盘写；这里把写入合并到最后一次。
+        """
+        now = now or time.time()
+        kps = {kp_id: self.dataset.get_kp(kp_id) for kp_id, _ in attempts}
+
+        def _apply(student: Student) -> list[AttemptResult]:
+            model = self.model_for(student)
+            results: list[AttemptResult] = []
+            for kp_id, correct in attempts:
+                kp = kps[kp_id]
+                state = student.state_of(kp_id)
+                p_before = model.p(state, kp, now)
+                new_state = model.update(state, kp, correct, now)
+                p_after = new_state.p_mastery
+                student.mastery[kp_id] = new_state
+                student.attempts.append(Attempt(kp_id=kp_id, correct=correct, ts=now))
+                item = _review.schedule_review(student, kp, correct, p_after, now)
+                results.append(AttemptResult(
+                    kp_id=kp_id, kp_name=kp.name, correct=correct,
+                    p_before=p_before, p_after=p_after,
+                    mastered=p_after >= self.config.mastered_for(model.name),
+                    review_due_in_hours=item.due_ts / 3600 - now / 3600,
+                ))
+            self._truncate_history(student)
+            return results
+
+        results, _ = self.store.mutate(sid, _apply)
+        return results
+
+    @staticmethod
+    def _truncate_history(student: Student) -> None:
+        """历史截断，防止 JSON 无限膨胀（骨架策略）。"""
+        if len(student.attempts) > 5000:
+            student.attempts = student.attempts[-3000:]
+
     def simulate_learner(self, sid: str, kp_ids: list[str],
                          ability: float = 0.6, noise: float = 0.15,
+                         seed: int | None = None,
                          now: float | None = None) -> list[AttemptResult]:
-        """模拟学生练习（演示/压测用）：正确率 ~ ability - difficulty + noise。"""
+        """模拟学生练习（演示/压测用）：正确率 ~ ability - difficulty + noise。
+
+        seed 固定随机流，使结果可复现；不传则使用独立随机源，不污染全局
+        random 状态（此前全局 random 未播种，导致同一份数据每次跑出的
+        作答记录不同，测试因此不稳定）。
+        """
         import random
+        rng = random.Random(seed)
         now = now or time.time()
-        results = []
+        # 先算好每题的作答结果，再整批落盘（N 次磁盘写 → 1 次）
+        pairs: list[tuple[str, bool]] = []
         for kid in kp_ids:
             kp = self.dataset.get_kp(kid)
-            p_correct = min(max(ability - kp.difficulty * 0.6 + random.uniform(-noise, noise),
+            p_correct = min(max(ability - kp.difficulty * 0.6 + rng.uniform(-noise, noise),
                                 0.05), 0.95)
-            results.append(self.record_attempt(sid, kid, random.random() < p_correct, now))
-        return results
+            pairs.append((kid, rng.random() < p_correct))
+        return self.record_attempts(sid, pairs, now=now)

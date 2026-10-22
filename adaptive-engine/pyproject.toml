@@ -1,0 +1,16 @@
+[project]
+name = "k12-adaptive-engine"
+version = "0.1.0"
+description = "K12 自适应学习引擎：先修图谱 + 掌握度建模 + 错题归因 + 路径规划 + 复习调度"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+# 让 `pytest` 在任何工作目录下都能 import 到 ale 包
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

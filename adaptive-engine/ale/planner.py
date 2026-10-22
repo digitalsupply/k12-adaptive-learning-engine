@@ -77,12 +77,13 @@ def plan(
     closure = {goal_id} | set(graph.ancestors(goal_id, max_depth=100))
 
     # 掌握度过滤
+    mastered = config.mastered_for(model.name)
     weak: dict[str, float] = {}
     skipped = 0
     for kid in closure:
         kp = graph.kps[kid]
         p = model.p(student.state_of(kid), kp, now)
-        if kid == goal_id or p < config.mastered_threshold:
+        if kid == goal_id or p < mastered:
             weak[kid] = p
         else:
             skipped += 1
@@ -196,15 +197,16 @@ def next_best(
     """
     hub = dict(graph.hubs(top_n=len(graph.kps)))
     dist_to_goal = graph.ancestors(goal_id, max_depth=1000) if goal_id in graph.kps else {}
+    mastered = config.mastered_for(model.name)
 
     recs: list[Recommendation] = []
     for kid, kp in graph.kps.items():
         p = model.p(student.state_of(kid), kp, now)
-        if p >= config.mastered_threshold:
+        if p >= mastered:
             continue
         prereqs = {pr for pr in graph.prereqs(kid) if pr in graph.kps}
         if any(model.p(student.state_of(pr), graph.kps[pr], now)
-               < config.mastered_threshold for pr in prereqs):
+               < mastered for pr in prereqs):
             continue  # 先修未满足，暂时不可学
 
         if goal_id and kid in dist_to_goal:

@@ -227,11 +227,28 @@ def test_real_data_smoke(real_engine):
     # 找一个有先修链的深节点
     goal = max(kps, key=lambda k: g.depth(k))
     chain = g.chain_to_root(goal)
-    eng.simulate_learner(stu.id, chain[:2], ability=0.3, noise=0.0)
+    # 固定随机种子：未播种时两次模拟可能恰好全对，导致没有错题可归因，
+    # 断言随机失败（同一个 seed 下每次结果一致）。
+    eng.simulate_learner(stu.id, chain[:2], ability=0.3, noise=0.0, seed=20240101)
     d = eng.diagnose_recent_failures(stu.id)
     assert d.root_causes
     p = eng.make_plan(stu.id, goal)
     assert p.nodes and p.nodes[-1].kp.id == goal
+
+
+def test_simulate_learner_is_reproducible(real_engine):
+    """同一 seed 必须得到完全相同的作答序列。"""
+    eng = real_engine
+    kps, _ = eng.dataset.group("初中", "数学")
+    picks = sorted(kps)[:20]
+
+    def run(seed):
+        stu = eng.create_student(f"复现-{seed}", model="bkt")
+        res = eng.simulate_learner(stu.id, picks, ability=0.6, noise=0.2, seed=seed)
+        return [(r.kp_id, r.correct) for r in res]
+
+    assert run(7) == run(7)
+    assert run(7) != run(8)
 
 
 # ---------------- 环与脏数据回归

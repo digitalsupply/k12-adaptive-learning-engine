@@ -25,9 +25,20 @@ class Config:
     # 低置信度提示阈值：低于此值的知识点在 UI 上以虚线弱化，但仍可用
     low_confidence_hint: float = 0.6
 
-    # 掌握判定阈值
+    # 掌握判定阈值（按模型区分）
     mastered_threshold: float = 0.85        # BKT: P(掌握)
     elo_mastered_threshold: float = 0.80    # Elo: logistic 概率
+
+    def mastered_for(self, model_name: str) -> float:
+        """按掌握度模型返回"已掌握"阈值。
+
+        BKT 的 P(掌握) 与 Elo 的胜率概率不是同一个量纲，用同一个阈值判定会
+        让 Elo 学生被更严格地对待（原实现里 elo_mastered_threshold 是死配置，
+        所有判断都落到了 mastered_threshold 上）。
+        """
+        if model_name == "elo":
+            return self.elo_mastered_threshold
+        return self.mastered_threshold
 
     # 诊断参数
     diag_max_depth: int = 6      # 向上回溯的最大先修层数
@@ -43,6 +54,9 @@ class Config:
 
     data_dir: Path = field(default_factory=lambda: DATA_DIR)
     students_dir: Path = field(default_factory=lambda: STUDENTS_DIR)
+    # 数据集派生索引的缓存目录（id→分组、名称→id 的倒排索引）。
+    # 放在引擎自己的目录下，不污染只读的 split/ 数据集。
+    cache_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "cache")
 
 
 DEFAULT = Config()

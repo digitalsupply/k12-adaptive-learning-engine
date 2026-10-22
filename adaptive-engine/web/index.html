@@ -23,6 +23,17 @@
     </label>
     <button id="newStudentBtn" title="创建新学生">＋学生</button>
     <label class="chk"><input type="checkbox" id="showMastered" checked> 显示已掌握着色</label>
+    <label>范围
+      <select id="scopeSel">
+        <option value="all">全部</option>
+        <option value="spine">主干（有先修关系）</option>
+        <option value="depth3">前 3 层</option>
+        <option value="depth5">前 5 层</option>
+        <option value="depth8">前 8 层</option>
+        <option value="focus">聚焦选中知识点</option>
+      </select>
+    </label>
+    <button id="clearScopeBtn" title="取消聚焦" class="hidden">取消聚焦</button>
   </div>
 </header>
 

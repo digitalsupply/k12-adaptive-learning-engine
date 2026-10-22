@@ -20,6 +20,11 @@ class MasteryState:
     attempts: int = 0
     correct: int = 0
     last_ts: float = 0.0          # 最后一次练习的 unix 秒
+    # Elo 专用的原始能力分（0~ability_span）。Elo 的内部状态是"能力分"，
+    # p_mastery 只是它映射出来的胜率——两者混存会导致 update() 把上一次
+    # 存下来的"概率"当成"能力分"再乘一遍 span，能力估计系统性偏低。
+    # None 表示"尚未记录能力分"，BKT 不使用该字段。
+    ability: float | None = None
 
 
 class MasteryModel(ABC):
@@ -148,22 +153,37 @@ class EloModel(MasteryModel):
                                 / self.params.scale))
         return p
 
+    def _ability_of(self, state: MasteryState) -> float:
+        """读出状态里的能力分。
+
+        优先用专门存的 ability 字段；老档案（升级前写的 JSON）没有这个字段，
+        退回到"把 p_mastery 当能力分比例"的旧口径，保证能继续读。
+        """
+        if state.ability is not None:
+            return state.ability
+        if state.attempts:
+            return state.p_mastery * self.params.ability_span
+        return self.params.ability_span / 2.0
+
+    def _prob_of(self, ability: float, kp: KnowledgePoint) -> float:
+        return 1.0 / (1.0 + 10 ** ((self._item_rating(kp) - ability) / self.params.scale))
+
     def update(self, state: MasteryState, kp: KnowledgePoint,
                correct: bool, ts: float) -> MasteryState:
         p = self.params
-        ability = state.p_mastery * p.ability_span if state.attempts \
-            else p.ability_span / 2.0
+        ability = self._ability_of(state)
         expected = 1.0 / (1.0 + 10 ** ((self._item_rating(kp) - ability) / p.scale))
         # K 随练习次数收敛，避免反复横跳
         k = p.k_factor / (1.0 + 0.1 * state.attempts)
         ability += k * ((1.0 if correct else 0.0) - expected)
 
-        prob = 1.0 / (1.0 + 10 ** ((self._item_rating(kp) - ability) / p.scale))
+        prob = self._prob_of(ability, kp)
         return MasteryState(
             p_mastery=min(max(prob, 0.001), 0.999),
             attempts=state.attempts + 1,
             correct=state.correct + (1 if correct else 0),
             last_ts=ts,
+            ability=ability,
         )
 
     def decay(self, state: MasteryState, kp: KnowledgePoint, now: float) -> MasteryState:
@@ -172,10 +192,10 @@ class EloModel(MasteryModel):
         days = (now - state.last_ts) / 86400.0
         p = self.params
         midpoint = p.ability_span / 2.0
-        ability = state.p_mastery * p.ability_span
+        ability = self._ability_of(state)
         ability = midpoint + (ability - midpoint) * math.exp(-p.forget_per_day * days)
-        prob = 1.0 / (1.0 + 10 ** ((self._item_rating(kp) - ability) / p.scale))
-        return MasteryState(prob, state.attempts, state.correct, state.last_ts)
+        prob = self._prob_of(ability, kp)
+        return MasteryState(prob, state.attempts, state.correct, state.last_ts, ability)
 
 
 # ---------------------------------------------------------------- 工厂

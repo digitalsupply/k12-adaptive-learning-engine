@@ -991,7 +991,8 @@ const targets = [
   ["embed-dark.html", "dark", { embed: true }],
   ["ohm-lab.html", "dark", {}],
   ["ohm-lab-light.html", "light", {}],
-  ["index.html", "dark", {}],
+  // 早期版本还输出过一个 index.html，与 ohm-lab.html 逐字节相同且无人引用，
+  // 白占 289 KB 仓库体积，已移除。
 ];
 
 mkdirSync(HERE, { recursive: true });
