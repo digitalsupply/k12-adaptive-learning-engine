@@ -201,12 +201,13 @@ class AdaptiveEngine:
         """出题：缓存 → LLM 命题 → 标注模板，三级回退。
 
         同 (kp_id, seed) 的题目永远相同（缓存保证），作答校验才能成立。
-        for_answer=True 是作答校验模式：只读缓存、绝不调 LLM（重建必须是当初
-        下发的那道题，且不能产生第二次生成开销）；缓存丢失时退回模板生成，
-        由 qhash 核对兜住不一致。force_template=True 跳过 LLM，用于测试。
+        for_answer=True 是作答校验模式：绝不调 LLM（重建必须是当初下发的那
+        道，且不能产生第二次生成开销），但仍要带上 llm 客户端——缓存键含模型
+        名，少了它会读不到当时的 LLM 缓存、错退回模板导致 qhash 失配 409。
+        force_template=True 跳过 LLM，用于测试。
         """
         kp = self.dataset.get_kp(kp_id)
-        llm = None if force_template or for_answer or prefer else self.llm
+        llm = None if force_template or prefer else self.llm
         q = _quiz.generate_cached(
             kp, seed=seed, cache_dir=self.config.quiz_cache_dir, llm=llm,
             min_assessability=self.config.quiz_min_assessability,

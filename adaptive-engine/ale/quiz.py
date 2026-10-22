@@ -157,8 +157,9 @@ def generate_cached(kp: KnowledgePoint, seed: int = 0,
             if cache_dir is not None:
                 _cache_put(cache_dir, kp, seed, llm, q)
             return q
-        except LLMError:
-            pass          # 兜底到模板；失败原因由调用方按需记录
+        except LLMError as e:
+            # 兜底到模板，但把失败原因打进日志，便于排查 key/额度/截断问题
+            print(f"[llm-fallback] {type(e).__name__}: {e}", flush=True)          # 兜底到模板；失败原因由调用方按需记录
 
     return generate(kp, seed=seed)
 

@@ -66,9 +66,17 @@ class LLMConfig:
     base_url: str = ""
     api_key: str = ""
     model: str = ""
-    timeout: float = 45.0
-    max_tokens: int = 2000
+    # 推理型模型(如 minimax/deepseek)思考也要十几秒,90s 是稳妥下限;
+    # 出题一次 35s 左右,45s 会误杀。
+    timeout: float = 90.0
+    # 推理模型的 reasoning_content 也占输出预算,出题 JSON 约 400 token,
+    # 思考可能吃掉 1~3k,给 6000 才不会半路截断。
+    max_tokens: int = 6000
     temperature: float = 0.7
+    # 稳定会话 ID：OpenCode Go 网关要求 x-opencode-session 头做路由亲和，
+    # 其余 OpenAI 兼容服务会忽略它。默认从 .env 的 K12_LLM_SESSION 读；
+    # 没配就自动生成一份并存 data/llm_session_id（重启不变）。
+    session_id: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -91,6 +99,9 @@ class LLMConfig:
             cfg.max_tokens = int(g("K12_LLM_MAX_TOKENS") or cfg.max_tokens)
         except ValueError:
             pass
+        cfg.session_id = (g("K12_LLM_SESSION") or "").strip()
+        if not cfg.session_id:
+            cfg.session_id = _default_session_id()
         return cfg
 
     @classmethod
@@ -132,6 +143,10 @@ class LLMClient:
             headers={
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
+                # Cloudflare 会拦 Python-urllib 默认 UA（403 error 1010）；
+                # OpenCode Go 要求正式 UA + 稳定会话头（路由亲和/提示缓存）
+                "User-Agent": "k12-adaptive-engine/0.2 (quiz-generation)",
+                "x-opencode-session": self.config.session_id,
             },
             method="POST")
         try:
@@ -153,6 +168,26 @@ class LLMClient:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"LLM 响应格式异常：{json.dumps(data, ensure_ascii=False)[:300]}") from e
+
+
+def _default_session_id() -> str:
+    """进程级稳定会话 ID（OpenCode Go 网关要求的 x-opencode-session 头）：
+    优先读持久化文件 data/llm_session_id，没有则生成一次并存盘，重启不变。"""
+    path = Path(__file__).resolve().parent.parent / "data" / "llm_session_id"
+    try:
+        sid = path.read_text(encoding="utf-8").strip()
+        if len(sid) >= 12:
+            return sid
+    except OSError:
+        pass
+    import secrets
+    sid = secrets.token_hex(16)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(sid, encoding="utf-8")
+    except OSError:
+        pass
+    return sid
 
 
 def parse_json_block(text: str) -> dict:
