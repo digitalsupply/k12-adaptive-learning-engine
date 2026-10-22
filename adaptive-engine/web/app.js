@@ -19,6 +19,8 @@ const post = (path, body) => api(path, {
 const state = {
   groups: [], band: null, subject: null,
   student: null, graph: null,
+  user: null,             // 当前登录用户 {id, username, is_guest, student_id}
+  viewMode: "chain",      // "chain"(知识链，默认) | "map"(全景依赖图)
   selected: null, rootCauses: new Set(), planNodes: new Set(),
   pos: {}, view: null,
   kpDetail: null, figure: null, figureBusy: false,
@@ -38,8 +40,8 @@ function showError(msg) {
 }
 
 /* ---------------- 初始化 ---------------- */
-
 async function init() {
+  await refreshAuth();                       // 会话：谁在登录（含游客）
   state.groups = await api("/api/groups");
   // 阈值由后端下发，避免前后端各写一份魔法数字
   try { state.cfg = await api("/api/config"); } catch (_) { /* 保留默认值 */ }
@@ -50,21 +52,17 @@ async function init() {
   refreshSubjectOptions();
 
   const students = await api("/api/students");
-  if (students.length === 0) students.push(await post("/api/students", { name: "演示学生", model: "bkt" }));
-  fillSelect($("studentSel"), students.map(s => s.id),
-             students.map(s => `${s.name} · ${s.model.toUpperCase()}`));
-  state.student = students[0].id;
-  $("studentSel").value = state.student;
+  setStateStudents(students);
 
   $("bandSel").onchange = () => {
     closeFigure();
     state.band = $("bandSel").value;
     resetFocus();
     refreshSubjectOptions();
-    loadGraph();
+    reloadView();
   };
-  $("subjectSel").onchange = () => { closeFigure(); state.subject = $("subjectSel").value; resetFocus(); loadGraph(); };
-  $("studentSel").onchange = () => { closeFigure(); state.student = $("studentSel").value; loadGraph(); };
+  $("subjectSel").onchange = () => { closeFigure(); state.subject = $("subjectSel").value; resetFocus(); reloadView(); };
+  $("studentSel").onchange = () => { closeFigure(); state.student = $("studentSel").value; reloadView(); };
   $("newStudentBtn").onclick = async () => {
     const name = prompt("学生姓名：", "学生" + (Date.now() % 1000));
     if (!name) return;
@@ -74,9 +72,30 @@ async function init() {
       const sel = $("studentSel");
       sel.add(new Option(`${s.name} · ${s.model.toUpperCase()}`, s.id));
       sel.value = s.id; state.student = s.id;
-      loadGraph();
-    } catch (e) { showError(e.message); }
+      reloadView();
+    } catch (e) {
+      if (/401|登录/.test(e.message)) openAuth("login", "创建学生前请先登录（或用游客模式）。");
+      else showError(e.message);
+    }
   };
+
+  $("loginBtn").onclick = () => openAuth("login");
+  $("tabLogin").onclick = () => openAuth("login");
+  $("tabRegister").onclick = () => openAuth("register");
+  $("authSubmit").onclick = authSubmit;
+  $("authGuest").onclick = authGuest;
+  $("authClose").onclick = closeAuth;
+  $("authModal").addEventListener("click", (e) => {
+    if (e.target === $("authModal")) closeAuth();
+  });
+  $("authPass").addEventListener("keydown", (e) => { if (e.key === "Enter") authSubmit(); });
+  $("authUser").addEventListener("keydown", (e) => { if (e.key === "Enter") $("authPass").focus(); });
+  $("logoutBtn").onclick = async () => {
+    await post("/api/auth/logout", {}).catch(() => {});
+    location.reload();
+  };
+
+  $("showMastered").onchange = renderGraph;
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
   $("scopeSel").onchange = async (e) => {
@@ -96,7 +115,7 @@ async function init() {
     await loadGraph();
   };
   setupSearch();
-  await loadGraph();
+  await enterChainView();                    // 默认知识链；全景图由切换钮进入
 }
 
 function fillSelect(sel, values, labels) {
@@ -142,6 +161,7 @@ function graphQuery() {
 }
 
 async function loadGraph() {
+  if (state.viewMode !== "map") return;            // 知识链模式下不拉大图
   if (!state.subject) return;
   if (!state.student) { showError("尚未选择学生"); return;   // 防止 student=null 请求
     }
@@ -177,9 +197,133 @@ function masteryColor(node) {
   return "#e74c3c";
 }
 
+/* ---------------- 视图模式：知识链（默认）/ 全景图 ---------------- */
+
+/* 全景图把一个大科目画成一团线球。默认视图只铺「当前知识点的先修链」
+   ——卡片列表逐张浮现，读得懂；全景依赖图留给需要全科大图的人（切换钮）。 */
+function reloadView() {
+  return state.viewMode === "map" ? loadGraph() : enterChainView();
+}
+
+async function enterChainView() {
+  state.viewMode = "chain";
+  document.body.classList.remove("mode-map");
+  $("viewToggle").textContent = "🗺 全景图";
+  $("viewToggle").title = "切换到全景依赖图";
+  $("graphWrap").classList.add("hidden");
+  $("chainWrap").classList.remove("hidden");
+  $("graphStats").textContent =
+    `${state.band}/${state.subject} · 知识链视图（全景图请点右上角）`;
+  await loadChain(state.selected);
+}
+
+function enterMapView() {
+  state.viewMode = "map";
+  document.body.classList.add("mode-map");
+  $("viewToggle").textContent = "⛓ 知识链";
+  $("viewToggle").title = "切换回知识链视图";
+  $("chainWrap").classList.add("hidden");
+  $("graphWrap").classList.remove("hidden");
+  loadGraph().then(() => { if (state.selected) centerOn(state.selected); });
+}
+
+$("viewToggle").onclick = () => {
+  if (state.viewMode === "chain") enterMapView();
+  else enterChainView();
+};
+
+/* ---------------- 知识链视图 ---------------- */
+
+async function loadChain(kpId) {
+  const wrap = $("chainWrap");
+  if (!state.student) {
+    wrap.innerHTML = `
+      <div class="chain-empty card">
+        <h3>开始之前</h3>
+        <p>还没有可选的学习档案。<button id="chainGoAuth" class="primary">登录 / 注册</button>
+        或<button id="chainGoGuest">以游客身份体验</button></p>
+      </div>`;
+    const go = $("chainGoAuth"); if (go) go.onclick = () => openAuth("login");
+    const g2 = $("chainGoGuest"); if (g2) g2.onclick = authGuest;
+    return;
+  }
+  if (!kpId) { await renderRecommendations(wrap); return; }
+  try {
+    const d = await api(`/api/kp/${encodeURIComponent(kpId)}/chain?student=${encodeURIComponent(state.student)}`);
+    renderChain(d);
+  } catch (e) {
+    wrap.innerHTML = `<div class="chain-empty card">知识链加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+/* 未选中知识点：给「推荐下一步」和搜索提示，避免一整面空白 */
+async function renderRecommendations(wrap) {
+  let recs = [];
+  try {
+    const r = await api(`/api/students/${encodeURIComponent(state.student)}/recommend?top_n=5`);
+    recs = r.recommendations || [];
+  } catch (_) { /* 未登录/无档案时推荐端点可能 4xx，静默退化 */ }
+  wrap.innerHTML = `
+    <div class="chain-intro card">
+      <h3>知识链</h3>
+      <p class="tiny">在左侧选一个知识点（或直接搜索），这里会沿着它的<b>先修链</b>从根到叶
+      逐张卡片浮现，标出你当前位置和掌握度；不再需要在一团线球里找路。</p>
+    </div>
+    <div class="chain-head">推荐下一步</div>
+    <div class="chain-list">
+      ${recs.map((n, i) => chainCard({
+        id: n.kp_id, name: n.name, p_mastery: n.p_mastery, level: n.p_mastery > 0 ? "learning" : "new",
+        delay: i,
+      }, { tail: `<div class="chain-why tiny">${esc(n.rationale || "")}</div>` })).join("") ||
+        `<div class="chain-empty tiny">没有推荐（先选学段/科目）。</div>`}
+    </div>`;
+  bindChainCards(wrap);
+}
+
+function chainCard(n, opts = {}) {
+  const pct = n.p_mastery != null ? `${(n.p_mastery * 100).toFixed(0)}%` : "未开始";
+  const lv = n.level || "new";
+  const lvTxt = { mastered: "已掌握", learning: "学习中", new: "未作答" }[lv] || lv;
+  return `
+    <div class="chain-card lv-${lv}" data-kp="${esc(n.id)}" style="animation-delay:${(opts.delay || 0) * 90}ms">
+      <div class="chain-card-main">
+        <span class="chain-name">${esc(n.name)}</span>
+        <span class="chain-pct lv-${lv}">${pct} · ${lvTxt}</span>
+      </div>
+      ${opts.tail || ""}
+    </div>`;
+}
+
+function renderChain(d) {
+  const wrap = $("chainWrap");
+  const chain = d.chain || [];
+  const leafIdx = chain.length - 1;
+  const cards = chain.map((n, i) => chainCard(n, {
+    delay: i,
+    arrow: i < leafIdx,
+    tail: i === leafIdx
+      ? `<div class="chain-why tiny">↑ 当前知识点：先修链自上而下依次铺垫</div>` : "",
+  }));
+  const deps = (d.dependents || []).map((n, i) =>
+    `<button class="dep-chip" data-kp="${esc(n.id)}" style="animation-delay:${i * 60}ms">${esc(n.name)}</button>`);
+  wrap.innerHTML = `
+    <div class="chain-head">${esc(d.band)} · ${esc(d.subject)} · 先修链（根 → 当前）</div>
+    <div class="chain-list">${cards.join("")}</div>
+    <div class="chain-head ${deps.length ? "" : "hidden"}">它的下游（学完它才能学）</div>
+    <div class="chain-deps">${deps.join("")}</div>`;
+  bindChainCards(wrap);
+}
+
+function bindChainCards(wrap) {
+  wrap.querySelectorAll("[data-kp]").forEach(el => {
+    el.onclick = () => selectKp(el.dataset.kp);
+  });
+}
+
 /* ---------------- 渲染 ---------------- */
 
 function renderGraph() {
+  if (state.viewMode === "chain") return;       // 当前视图不是全景图
   const svg = $("svg");
   svg.innerHTML = "";
   if (!state.graph) return;
@@ -357,15 +501,18 @@ function attachViewControls(svg, W, H) {
 async function selectKp(kpId) {
   if (state.figure && state.selected !== kpId) closeFigure();
   state.selected = kpId;
-  renderGraph();
-  const svg = $("svg");
-  if (svg && !svg.classList.contains("no-labels")) {
-    // 只在用户已放大时保持视口，避免每次点击都跳动
+  if (state.viewMode === "map") {
+    renderGraph();
   }
   try {
     const d = await api(`/api/kp/${kpId}?student=${encodeURIComponent(state.student)}`);
     renderKpCard(d);
-    centerOn(kpId);
+    if (state.viewMode === "map") {
+      // 只在用户已放大时保持视口，避免每次点击都跳动
+      centerOn(kpId);
+    } else {
+      await loadChain(kpId);
+    }
   } catch (e) { showError(e.message); }
 }
 
@@ -457,9 +604,13 @@ function renderQuiz() {
   const q = state.quiz;
   if (!q) { slot.innerHTML = ""; return; }
   const letters = "ABCDEFGH";
+  const isLLM = q.source === "llm" || q.source === "llm-cache";
+  const badge = isLLM
+    ? `<span class="src-badge ai" title="由 ${esc(q.model || "AI")} 生成，仅此题可用">🤖 AI 命题</span>`
+    : `<span class="src-badge tpl" title="由知识点标注生成（未配置 LLM 时的兜底）">📝 模板示例</span>`;
   slot.innerHTML = `
     <div class="quiz">
-      <div class="quiz-kind">${q.kind === "judge" ? "判断正误" : "单项选择"}</div>
+      <div class="quiz-kind">${q.kind === "judge" ? "判断正误" : "单项选择"}${badge}</div>
       <div class="quiz-prompt">${esc(q.prompt)}</div>
       <div class="quiz-options">
         ${q.options.map((o, i) => `
@@ -481,16 +632,22 @@ async function submitAnswer(choice) {
   slot.querySelectorAll(".qopt").forEach(b => { b.disabled = true; });
   try {
     const r = await post(`/api/students/${encodeURIComponent(state.student)}/answer`, {
-      kp_id: q.kp_id, seed: q.seed, choice,
+      kp_id: q.kp_id, seed: q.seed, choice, qhash: q.qhash,
     });
     showQuizResult(r, q);
     updateMasteryAfterAttempt(r);
-    await refreshGraphData();
+    if (state.viewMode === "map") await refreshGraphData(); else await loadChain(q.kp_id);
     sendMasteryToFigure(r.p_after);
   } catch (e) {
     showError(e.message);
     q.answered = false;
-    renderQuiz();
+    if (/409|刷新/.test(e.message)) {
+      // 题目在下发与作答之间被服务端刷新（缓存清理/换模型）→ 重新抽一题
+      state.quiz = null;
+      slot.innerHTML = `<div class="quiz-none">题目已更新，请点「换一题」重新作答。</div>`;
+    } else {
+      renderQuiz();
+    }
   }
 }
 
@@ -660,9 +817,13 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function refreshGraphData() {
-  const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?${graphQuery()}`);
-  state.graph = g;
-  renderGraph();
+  if (state.viewMode !== "chain") {
+    const g = await api(`/api/graph/${encodeURIComponent(state.band)}/${encodeURIComponent(state.subject)}?${graphQuery()}`);
+    state.graph = g;
+    renderGraph();
+  }
+  // 知识链模式：重载当前链（掌握度章/等级会变）
+  if (state.selected) await loadChain(state.selected);
 }
 
 $("btnAsk").onclick = askQuestion;

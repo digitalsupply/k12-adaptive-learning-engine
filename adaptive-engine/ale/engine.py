@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import diagnose as _diagnose
@@ -13,8 +14,13 @@ from . import review as _review
 from .config import Config, DEFAULT
 from .dataset import Dataset
 from .graph import KnowledgeGraph
+from .llm import LLMClient, LLMConfig
 from .mastery import create_model
 from .state import Attempt, Student, StudentStore
+
+
+class QHashMismatch(ValueError):
+    """作答时重建的题目与当初下发的不一致（缓存被清/换了模型）。"""
 
 
 @dataclass(slots=True)
@@ -28,11 +34,35 @@ class AttemptResult:
     review_due_in_hours: float
 
 
+def _make_store(config: Config):
+    """按配置选择学生档案后端。
+
+    sqlite（默认）：students 表存档，支持 owner_id 归属；同库还有账号表，由
+    server 层的 Accounts 负责。首次启动若库里没有档案而旧 JSON 目录存在，
+    自动把旧档案导入为演示档案（is_demo=1，对所有人只读可见）。
+    file：JSON 文件版（state.StudentStore），K12_STORE=file 时启用。
+    """
+    if config.store_backend == "file":
+        return StudentStore(config.students_dir)
+    from .store_sqlite import StudentStore as _SQLiteStore
+    store = _SQLiteStore(config.db_path)
+    with store._conn() as con:                 # noqa: SLF001 - 初始化用
+        n = con.execute("SELECT COUNT(*) AS n FROM students").fetchone()["n"]
+    if n == 0:
+        legacy = Path(config.students_dir)
+        if legacy.exists():
+            m = store.import_legacy_dir(legacy)
+            if m:
+                print(f"[store] 已从 JSON 目录导入 {m} 个旧档案（标记为演示档案）")
+    return store
+
+
 class AdaptiveEngine:
     def __init__(self, config: Config | None = None):
         self.config = config or DEFAULT
         self.dataset = Dataset(self.config)
-        self.store = StudentStore(self.config.students_dir)
+        self.store = _make_store(self.config)
+        self.llm = LLMClient(LLMConfig.from_env())
         self._graphs: dict[tuple[str, str], KnowledgeGraph] = {}
 
     # ---------------- 图
@@ -165,21 +195,39 @@ class AdaptiveEngine:
     # ---------------- 出题 / 作答
 
     def make_question(self, kp_id: str, seed: int = 0,
-                      prefer: str | None = None) -> _quiz.Question:
-        """为某个知识点出一道题（确定性：同 kp_id + seed → 同一道题）。"""
+                      prefer: str | None = None,
+                      for_answer: bool = False,
+                      force_template: bool = False) -> _quiz.Question:
+        """出题：缓存 → LLM 命题 → 标注模板，三级回退。
+
+        同 (kp_id, seed) 的题目永远相同（缓存保证），作答校验才能成立。
+        for_answer=True 是作答校验模式：只读缓存、绝不调 LLM（重建必须是当初
+        下发的那道题，且不能产生第二次生成开销）；缓存丢失时退回模板生成，
+        由 qhash 核对兜住不一致。force_template=True 跳过 LLM，用于测试。
+        """
         kp = self.dataset.get_kp(kp_id)
-        return _quiz.generate(kp, seed=seed, prefer=prefer,
-                              min_assessability=self.config.quiz_min_assessability)
+        llm = None if force_template or for_answer or prefer else self.llm
+        q = _quiz.generate_cached(
+            kp, seed=seed, cache_dir=self.config.quiz_cache_dir, llm=llm,
+            min_assessability=self.config.quiz_min_assessability,
+            rebuild=for_answer or force_template)
+        if prefer:                  # 强制题型（测试用）
+            q = _quiz.generate(kp, seed=seed, prefer=prefer,
+                               min_assessability=self.config.quiz_min_assessability)
+        return q
 
     def answer_question(self, sid: str, kp_id: str, seed: int, choice: int,
-                        now: float | None = None) -> dict[str, Any]:
-        """提交作答：服务端重新生成题目并判分，然后写入掌握度。
+                        now: float | None = None,
+                        qhash: str | None = None) -> dict[str, Any]:
+        """提交作答：服务端重建题目 → 核对选项哈希 → 判分 → 写掌握度。
 
-        题目不存服务端，靠 (kp_id, seed) 确定性重建，所以不存在"客户端拿着
-        答案来提交"的问题——选项顺序也是服务端定的。
+        题目不存服务端，靠 (kp_id, seed) 从出题缓存重建；qhash 由前端随答案
+        带回，防止题目在两次请求之间被刷新（缓存被清/模型换了）却仍按旧题判分。
         """
         now = now or time.time()
-        question = self.make_question(kp_id, seed=seed)
+        question = self.make_question(kp_id, seed=seed, for_answer=True)
+        if qhash is not None and question.qhash != qhash:
+            raise QHashMismatch("题目已刷新，请重新获取再作答")
         if not (0 <= choice < len(question.options)):
             raise ValueError(f"选项越界：{choice}")
 

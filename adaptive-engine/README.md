@@ -9,23 +9,27 @@ adaptive-engine/
 │   ├── dataset.py        数据集懒加载（按学段×科目）+ 全局 ID 索引 + 派生索引缓存
 │   ├── graph.py          先修 DAG：拓扑序、祖先回溯、分层、枢纽识别、环检测
 │   ├── mastery.py        MasteryModel 接口 + BKT / Elo 两个实现（可插拔）
-│   ├── quiz.py           题目生成：正确说法 / 常见误区 → 选择题与判断题
+│   ├── llm.py            OpenAI 兼容 LLM 客户端（纯标准库；.env 三行配置 + 内置 Provider 表）
+│   ├── quiz.py           出题：LLM 命题（带完整上下文的命题规范）→ 缓存 → 标注模板兜底
+│   ├── accounts.py       账号：PBKDF2 口令哈希 + HMAC 签名会话 Cookie（纯标准库）
+│   ├── store_sqlite.py   学生档案 SQLite 存储（WAL；与文件版同一套接口）
 │   ├── diagnose.py       错题归因：沿先修链回溯 + 贪心集合覆盖找根因
 │   ├── planner.py        路径规划：先修闭包 → 剔除已掌握 → 分阶段输出
 │   ├── review.py         SM-2 变体复习调度
-│   ├── state.py          学生状态（作答历史/掌握度/复习队列）JSON 持久化（原子写 + 文件锁）
+│   ├── state.py          学生状态（作答历史/掌握度/复习队列）+ 文件版存储（原子写 + 文件锁）
 │   ├── engine.py         AdaptiveEngine 门面（CLI 与 API 共用）
 │   ├── figures.py        交互图形注册表（知识点 UUID → 图形）
 │   └── config.py         全部可调参数（阈值/衰减/回溯深度…）
-├── cli.py                命令行入口
-├── server.py             FastAPI 服务 + 托管前端 + 托管图形静态资源
-├── web/                  单页前端（SVG 图谱交互，无框架依赖）
+├── cli.py                命令行入口（含 llm-check：一条命令验证 LLM 连通并出样题）
+├── server.py             FastAPI 服务 + 账号端点 + 归属守卫 + 托管前端/图形资源
+├── web/                  单页前端（知识链视图默认；SVG 全景图可选；无框架依赖）
 ├── figures/              交互图形（离线构建的静态 HTML/SVG）
 │   ├── registry.json     图形注册表：知识点 UUID → 图形
 │   └── ohm-lab/          欧姆定律实验台（model / geom / live / build）
-├── tests/                79 个测试：合成图单测 + 真实数据集端到端 + 出题器 + 图形注册表 + 回归
+├── tests/                116 个测试：合成图单测 + 真实数据集端到端 + LLM 出题链路 + 账号/存储 + 回归
+├── .env.example          LLM 配置样例（复制为 .env 填 Key；.env 已 gitignore）
 ├── pyproject.toml        pytest 配置（pythonpath，任意目录可跑）
-└── data/                 运行时目录（students/ 学生档案、cache/ 派生索引，均已 gitignore）
+└── data/                 运行时目录（app.db、secret.key、students/、quiz_cache/、cache/，均 gitignore）
 ```
 
 ## 快速开始
@@ -47,6 +51,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python cli.py diagnose <SID>          # 错题归因
 .venv/bin/python cli.py plan <SID> <goal_kp_id> # 分阶段学习路径
 .venv/bin/python cli.py next <SID> --goal <goal_kp_id>
+
+# LLM 出题质检：一条命令验证连通性并出样题（需先复制 .env.example 为 .env 填 Key）
+.venv/bin/python cli.py llm-check
 
 # Web 服务（浏览器打开 http://localhost:8000）
 .venv/bin/python server.py
@@ -81,32 +88,60 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   接口层、规划器、归因器用的是同一个口径——此前 `elo_mastered_threshold` 是死配置，
   所有判断都落到了 0.85 上。
 
-### 出题：把标注变成可判分的题
+### 出题：LLM 命题为主，标注兜底
 
-`annotations` 里每个知识点都带六个标注维度，其中两个直接可以出题：
+在 `adaptive-engine/` 复制 `.env.example` 为 `.env`、填三项 OpenAI 兼容配置
+（`K12_LLM_BASE_URL / K12_LLM_API_KEY / K12_LLM_MODEL`）即启用 AI 命题：
+`cli.py llm-check` 一条命令验证连通并出样题。
 
-- `learningObjectives`（正确说法）→ 可作**正确答案**
-- `misconceptions`（常见误区）→ 可作**干扰项**
-- `assessability`（0~1）→ 低于 `quiz_min_assessability` 的知识点不出题
+**为什么不用模板出题**：标注原文是标签式残句（「认为…」「能…」「混淆…」），
+直接当选项读起来生硬。LLM 路径把知识点的完整材料打包成上下文——
+知识点名/学段/教材位置/`learningObjectives`（标准答案素材）/`misconceptions`
+（干扰项素材）——并按命题规范要求：
 
-两种题型（`ale/quiz.py`）：
+1. 四个选项**必须改写成完整自然的陈述句**，禁止动词开头的标注残句；
+2. 至少一个干扰项来自误区，且要**改写成看起来合理**的说法（误区之所以是
+   常见误区，就是因为它骗得到人，选项不能一眼假）；
+3. 正确项与课标一致、具体可判断；不出「以上都对/都不对」，选项互不包含；
+4. 解析要说清正确项为什么对、错误项踩了哪条误区。
 
-| 题型 | 题干 | 正确项 | 干扰项 |
-|---|---|---|---|
-| `choice`（70%） | 下列哪项说法是正确的？ | 一条 learningObjective | 2–3 条 misconception |
-| `judge`（30%） | 判断正误：某陈述 | 「说法正确」/「说法错误」 | — |
+生成路径三级回退：**缓存 → LLM → 模板**。同一 `(kp_id, seed, model)` 的题落盘
+`data/quiz_cache/`（原子写；换模型或改提示词自动换一批），标题答耗时从秒级降到 0。
+LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度），不合格直接走兜底，
+不会把坏题发给学生。
 
-**judge 题的陈述有一半来自误区（答案"错"）、一半来自正确目标（答案"对"）**，
-否则答案恒定就能被猜中。答错时引擎会指出学生踩中的是哪一条误区：
+**防串题**：响应带选项哈希 `qhash`，作答时随答案带回；服务端按 `(kp_id, seed)`
+在读缓存里重建同一道题并核对哈希——缓存被清或换了模型会立即以 **409** 提示
+前端重新抽题，而不是拿另一道题悄悄判分。下发接口永远不含 `answer_index`。
 
-> 💡 你很可能持有这个误区：**记混 tan30° 与 tan60° 的值（如 tan30°=√3）**
-
-题目由 `(kp_id, seed)` **确定性生成**，服务端不存题库——出题和判分都靠重新
-生成同一道题，所以不存在"客户端拿着答案来提交"的情况（下发接口也不返回
-`answer_index`）。
+没有配 Key 时也不影响使用：模板路径照常出题（详情见旧模板规则），前端以
+「📝 模板示例」徽标区分「🤖 AI 命题」。
 
 数据覆盖：`learningObjectives` 和 `misconceptions` 在 33,765 个知识点上的
 覆盖率都是 99.8%，其中 81% 的 `assessability ≥ 0.7`。
+
+### 账号体系：SQLite 落库
+
+注册/登录/游客三种会话，全部落在 `data/app.db`（SQLite，WAL 模式，零部署）：
+
+- **口令**：PBKDF2-HMAC-SHA256 + 每用户随机盐（12 万次迭代），纯标准库。
+- **会话**：无状态 HMAC 签名 Cookie（`k12_session`，HttpOnly + SameSite=Lax），
+  服务重启不掉登录态；签名密钥首次启动自动生成到 `data/secret.key`（0600），
+  轮换该文件即全员下线。
+- **归属**：学生档案带 `owner_id`。注册自动建档并绑定；写学生的所有端点
+  （作答/路径/模拟…）都过归属守卫——**别人的正式档案按 404 处理（不暴露存在
+  性），演示档案 403 只读**。首次启动若库为空且存在旧 JSON 档案，自动导入为
+  演示档案（对所有人可见）。
+- **游客模式**：不注册即可完整体验（一键游客账号 + 档案），但不设口令、
+  不能再次登录；页面提示“注册后可长期保存”。
+
+### 知识链视图（默认）与全景图
+
+上万个知识点画成一张大图必然是一团线球。前端默认改为**知识链**：选中一个
+知识点后，沿先修关系回溯出的「根 → 当前」链条以卡片逐张浮现
+（CSS 交错动画），每张卡标出掌握百分比与状态色；下方列出该知识点的直接下游。
+未选中知识时给「推荐下一步」入口。全景依赖图降级为可选
+（「🗺 全景图」按钮，按需裁剪，见下文参数）。
 
 ### 错题归因：证据传播 + 贪心集合覆盖
 
@@ -141,12 +176,18 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | GET | `/api/config` | 前端阈值下发（掌握度阈值、置信度提示阈值…） |
 | GET | `/api/search?q=&band=&subject=` | 知识点搜索 |
 | GET | `/api/kp/{id}?student=` | 详情（目标/误区/先修链/掌握度） |
-| GET | `/api/quiz/{id}?seed=` | 出一道题（响应不含答案） |
-| POST | `/api/students/{sid}/answer` | 提交作答 `{kp_id, seed, choice}` → 判分 + 写掌握度 + 答错归因 |
+| GET | `/api/kp/{id}/chain?student=` | 知识链：先修链（根→叶）+ 直接下游 + 掌握度 |
+| GET | `/api/quiz/{id}?seed=` | 出一道题（响应不含答案；`source` 标明 AI 命题/模板） |
+| POST | `/api/students/{sid}/answer` | 提交作答 `{kp_id, seed, choice, qhash}` → 核对哈希判分 + 写掌握度 + 答错归因；哈希不一致 409 |
 | GET | `/api/graph/{band}/{subject}?student=&depth=&root=&spine=&max_nodes=` | 图谱可视化数据（支持按范围收窄，见下） |
-| POST | `/api/students` | 建学生 `{name, model}` |
-| POST | `/api/students/{sid}/attempt` | 记录作答 `{kp_id, correct}`（答错自动归因） |
-| POST | `/api/students/{sid}/attempts` | 批量记录作答 `{attempts:[{kp_id, correct}]}`（整批只写一次档案） |
+| POST | `/api/auth/register` | 注册 `{username, password}` → 自动建档绑定，设会话 Cookie |
+| POST | `/api/auth/login` | 登录 `{username, password}` |
+| POST | `/api/auth/guest` | 游客模式（免注册，自动建游客账号+档案） |
+| GET | `/api/auth/me` | 当前用户（未登录返回 `{user: null}`） |
+| POST | `/api/auth/logout` | 退出（清 Cookie） |
+| POST | `/api/students` | 建学生 `{name, model}`（**需登录**，归属当前用户） |
+| POST | `/api/students/{sid}/attempt` | 记录作答 `{kp_id, correct}`（答错自动归因；需登录 + 归属校验） |
+| POST | `/api/students/{sid}/attempts` | 批量记录作答（整批只写一次档案） |
 | POST | `/api/students/{sid}/simulate` | 模拟练习 `{kp_ids, ability, noise, seed}` |
 | POST | `/api/students/{sid}/diagnose` | 归因 `{kp_ids}` |
 | GET | `/api/students/{sid}/diagnose/recent` | 最近错题自动归因 |
@@ -175,16 +216,25 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ## 性能与持久化
 
+- **双后端学生档案**：默认 **SQLite**（`data/app.db`，WAL + busy_timeout，
+  `store_sqlite.py` 与文件版同一套方法签名，`data/students/` 里旧的 JSON 档案
+  首次启动自动导入为演示档案）；环境变量 `K12_STORE=file` 可切回旧文件版。
+  账号表与学生表同库，`RLock` 保护进程内「读-改-写」（`mutate()` 持锁内部还要
+  再进锁存档——`threading.Lock` 在这里会自锁死，测试
+  `test_mutate_locks_and_persists` 守住）。
 - **派生索引缓存**：`kp_id → (学段, 科目)` 与 `名称/别名 → kp_id` 两个索引会落盘到
   `data/cache/`，以 split 文件的 `(路径, 大小, mtime)` 指纹判断新鲜度，数据集变了
   自动重建。冷启动 `locate()` 从 0.39 s 降到 0.015 s，搜索从 0.41 s / 157 MB 降到
   0.17 s / 106 MB。`cli.py prebuild-index` 可手动预热。
 - **学生档案原子写**：先写同目录临时文件再 `os.replace` 覆盖，中途崩溃不会留下
-  半截 JSON；失败时清掉临时文件，原档案毫发无损。
-- **文件锁**：`StudentStore.mutate()` 在 `fcntl` 独占锁内完成「读-改-写」，
-  多 worker 并发作答不会互相覆盖（此前是裸的读-改-写，后写的那次会丢）。
-- **损坏档案降级**：`get()` 遇到坏 JSON 抛 `KeyError`（API 回 404 + 提示），
+  半截 JSON；失败时清掉临时文件，原档案毫发无损。（SQLite 后端走语句级事务 +
+  WAL，语义等价）
+- **文件锁**（`K12_STORE=file` 后端）：`StudentStore.mutate()` 在 `fcntl` 独占锁
+  内完成「读-改-写」，多 worker 并发作答不会互相覆盖。
+- **损坏档案降级**：`get()` 遇到坏数据抛 `KeyError`（API 回 404 + 提示），
   列表接口跳过坏档案，不会整个挂掉。
+- **LLM 出题缓存**：`data/quiz_cache/` 按 `(kp_id, seed, model, 提示词版本)`
+  原子落盘；缓存命中后出题 0 开销、判分严格一致。
 
 
 ## 交互图形：欧姆定律实验台
@@ -268,19 +318,17 @@ node --test figures/ohm-lab/model.test.mjs   # 10 个模型断言
 
 ## 已知边界（骨架阶段）
 
-- 学生状态存 JSON 文件（已加原子写 + 文件锁），适合单机演示；
-  生产应换 SQLite/Postgres——文件锁只能防丢更新，防不住跨机部署。
-- **题目是模板生成的**，不是真人题库：题干由知识点名 + 标注拼装，测的是
-  "能不能识别出哪条是误区"，而不是计算与推理。真正的计算题需要接外部题库。
+- **LLM 需自备 Key**：`.env` 三行配置（OpenAI 兼容），未配置时模板出题兜底；
+  free-tier 网关（如 OpenCode 免费档）做了客户端锁定，只能用直连 Provider。
 - 交互图形目前只有「欧姆定律实验台」一个，注册表可继续扩展；
   图形产物需要手工执行 `node figures/ohm-lab/build.mjs` 重建（不进 CI）。
 - 关系不跨学科不跨学段（数据集本身如此），跨科归因暂不支持。
 - 高中知识点 `grades` 常为空，展示层回退到教材模块名。
-- 估时、推荐权重均为可解释的启发式，未用真实作答数据校准——这正是骨架留白：
-  接入真实题库后，把 `misconceptions` 变成干扰项的做法可以保留，但题干要从
-  模板生成换成真人命题。
-- Elo 的能力分与胜率虽然已分开存放，但能力分仍以 `p_mastery` 的比例做持久化
-  兼容层；接入真实数据后建议给 Elo 单独的 state schema。
+- 估时、推荐权重均为可解释的启发式，未用真实作答数据校准。
+- SQLite 单文件库：单机/单机多进程没问题；跨机部署需迁 Postgres
+  （`store_sqlite.py` 已把 SQL 收敛在一个模块，迁移只动这一处）。
+- 会话令牌是无状态 HMAC 签名：没有服务端会话表，退出是删 Cookie；
+  需要强制下线时轮换 `data/secret.key`。
 - CORS 默认放开（本地演示用）；部署到公网请设 `K12_CORS_ORIGINS`
   （逗号分隔的来源列表）。
 

@@ -5,13 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>K12 自适应学习引擎</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%2321618c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
 <header>
-  <h1>K12 自适应学习引擎 <span class="sub">知识图谱 · 掌握度 · 错题归因 · 路径规划</span></h1>
+  <div class="headrow">
+    <h1>K12 自适应学习引擎 <span class="sub">知识链 · 掌握度 · 错题归因 · 路径规划</span></h1>
+    <div class="authbar" id="authBar">
+      <span id="authWho" class="auth-who hidden"></span>
+      <button id="loginBtn">登录 / 注册</button>
+      <button id="logoutBtn" class="hidden">退出</button>
+    </div>
+  </div>
   <div id="errorBanner" class="error-banner hidden"></div>
   <div class="controls">
+    <button id="viewToggle" class="primary" title="切换到全景依赖图">🗺 全景图</button>
     <label>学段
       <select id="bandSel"></select>
     </label>
@@ -22,8 +30,8 @@
       <select id="studentSel"></select>
     </label>
     <button id="newStudentBtn" title="创建新学生">＋学生</button>
-    <label class="chk"><input type="checkbox" id="showMastered" checked> 显示已掌握着色</label>
-    <label>范围
+    <label class="chk map-only"><input type="checkbox" id="showMastered" checked> 显示已掌握着色</label>
+    <label class="map-only">范围
       <select id="scopeSel">
         <option value="all">全部</option>
         <option value="spine">主干（有先修关系）</option>
@@ -33,7 +41,7 @@
         <option value="focus">聚焦选中知识点</option>
       </select>
     </label>
-    <button id="clearScopeBtn" title="取消聚焦" class="hidden">取消聚焦</button>
+    <button id="clearScopeBtn" title="取消聚焦" class="map-only hidden">取消聚焦</button>
   </div>
 </header>
 
@@ -42,13 +50,16 @@
     <div class="toolbar">
       <input id="searchBox" placeholder="搜索知识点…（回车）" autocomplete="off">
       <div id="searchResults" class="search-results"></div>
-      <button id="fitBtn" title="缩放到能看见完整图谱">适应窗口</button>
+      <button id="fitBtn" class="map-only" title="缩放到能看见完整图谱">适应窗口</button>
       <span id="graphStats" class="stats"></span>
     </div>
-    <div id="graphWrap" class="graph-wrap">
+    <div id="graphWrap" class="graph-wrap hidden">
       <svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>
-    <div class="legend">
+    <div id="chainWrap" class="chain-wrap">
+      <div class="chain-empty card">正在加载…</div>
+    </div>
+    <div class="legend map-only">
       <span><i class="dot" style="background:#e74c3c"></i>未掌握</span>
       <span><i class="dot" style="background:#f39c12"></i>学习中</span>
       <span><i class="dot" style="background:#27ae60"></i>已掌握</span>
@@ -92,25 +103,40 @@
     <div id="emptyHint" class="card hint">
       <h3>如何使用</h3>
       <ol>
-        <li>左上选择学段/科目，图中点一个知识点</li>
-        <li>点「✓/✗」模拟作答，观察掌握度变化</li>
-        <li>点「归因此错」沿先修链找病根</li>
+        <li>左上选择学段/科目，选中一个知识点（默认以知识链呈现它的先修脉络）</li>
+        <li>点「练习一下」答题；AI 命题的题干选项都是完整自然的句子</li>
+        <li>答错点「归因此错」沿先修链找病根</li>
         <li>点「学习路径」生成分阶段补救计划</li>
       </ol>
-      <p class="tiny">先修关系只在同一学科同学段内成立。</p>
-    </div>
-
-    <div id="planCard" class="card hidden">
-      <h3>学习路径 <button class="x" data-close="planCard">✕</button></h3>
-      <div id="planBody"></div>
+      <p class="tiny">先修关系只在同一学科同学段内成立。需要全科大图时切「🗺 全景图」。</p>
     </div>
 
     <div id="diagCard" class="card hidden">
-      <h3>错题归因 <button class="x" data-close="diagCard">✕</button></h3>
+      <h3>错题归因</h3>
       <div id="diagBody"></div>
+    </div>
+    <div id="planCard" class="card hidden">
+      <h3>学习路径</h3>
+      <div id="planBody"></div>
     </div>
   </aside>
 </main>
+
+<div id="authModal" class="auth-modal hidden" role="dialog" aria-modal="true">
+  <div class="auth-box">
+    <button id="authClose" class="x" title="关闭">✕</button>
+    <h3 id="authTitle">登录</h3>
+    <div class="auth-tabs">
+      <button id="tabLogin" class="on">登录</button>
+      <button id="tabRegister">注册</button>
+    </div>
+    <label>用户名<input id="authUser" placeholder="2~32 个字" autocomplete="username"></label>
+    <label>密码<input id="authPass" type="password" placeholder="至少 6 位" autocomplete="current-password"></label>
+    <button id="authSubmit" class="primary wide">登录</button>
+    <button id="authGuest" class="wide">先逛逛（游客模式，可完整体验）</button>
+    <div id="authErr" class="auth-err hidden"></div>
+  </div>
+</div>
 
 <div id="figureModal" class="figure-modal hidden" role="dialog" aria-modal="true" aria-labelledby="figureTitle">
   <div class="figure-modal-box">
@@ -129,6 +155,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

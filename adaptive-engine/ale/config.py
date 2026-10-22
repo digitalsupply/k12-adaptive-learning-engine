@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 默认数据集位置：本仓库的 ../split（即 k12-knowledge-points/split）
 DATA_DIR = Path(os.environ.get("K12_DATA_DIR") or PROJECT_ROOT.parent / "split")
@@ -53,6 +56,12 @@ class Config:
     quiz_min_assessability: float = 0.5
     # 每次答题抽题用的随机种子偏移量（配合 kp_id 保证同一知识点题目可复现）
     quiz_seed_salt: int = 0
+    # LLM 命题（OpenAI 兼容）走环境变量 K12_LLM_BASE_URL / API_KEY / MODEL /
+    # TIMEOUT（.env 也可），由 engine 在初始化时读取——不在 Config 里固化，
+    # 因为 .env 可能在 Config 导入之后才加载。
+    # LLM 出题缓存目录（同 (kp_id, seed, model) 的题不重复生成）
+    quiz_cache_dir: Path = field(default_factory=lambda:
+                                 PROJECT_ROOT / "data" / "quiz_cache")
 
     # 遗忘
     bkt_forget_per_day: float = 0.02   # BKT P(L) 向先验指数回落速率/天
@@ -60,6 +69,11 @@ class Config:
 
     data_dir: Path = field(default_factory=lambda: DATA_DIR)
     students_dir: Path = field(default_factory=lambda: STUDENTS_DIR)
+    # 学生档案后端：sqlite（默认，支持账号归属）或 file（旧 JSON 文件版）。
+    # 环境变量 K12_STORE=file 可切回。
+    store_backend: str = os.environ.get("K12_STORE", "sqlite")
+    # SQLite 数据库（users 表 + students 表）
+    db_path: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "app.db")
     # 数据集派生索引的缓存目录（id→分组、名称→id 的倒排索引）。
     # 放在引擎自己的目录下，不污染只读的 split/ 数据集。
     cache_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "cache")

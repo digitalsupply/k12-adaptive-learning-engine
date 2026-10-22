@@ -9,15 +9,19 @@ import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from ale.accounts import SESSION_COOKIE, Accounts
 from ale.config import FIGURES_DIR, WEB_DIR
-from ale.engine import AdaptiveEngine
+from ale.engine import AdaptiveEngine, QHashMismatch
 from ale.figures import FigureRegistry
+from ale.llm import load_dotenv
+
+load_dotenv()          # 项目根 .env（LLM 配置等），不覆盖进程已有环境变量
 
 app = FastAPI(title="K12 自适应学习引擎", version="0.1.0")
 # CORS 默认放开（本地演示）；部署到公网时用 K12_CORS_ORIGINS 指定来源列表。
@@ -47,6 +51,8 @@ class AnswerIn(BaseModel):
     kp_id: str
     seed: int = 0
     choice: int = Field(..., ge=0, le=9)
+    # 出题响应里带回来的选项哈希；服务端核对，防"题目在两次请求间变掉"
+    qhash: str | None = None
 
 
 class DiagnoseIn(BaseModel):
@@ -103,6 +109,60 @@ def search(q: str, band: str | None = None, subject: str | None = None,
              "difficulty": kp.difficulty, "kp_type": kp.kp_type,
              "kp_type_label": kp.kp_type_label}
             for kp in eng.dataset.search(q, band, subject, limit)]
+
+
+@app.get("/api/kp/{kp_id}/chain")
+def kp_chain(kp_id: str, student: str | None = None) -> dict[str, Any]:
+    """知识链视图：该知识点的先修链（根→叶子）+ 直接下游。
+
+    图谱全景在上万个知识点上必然变成一团线球，所以前端默认只展示这一条
+    链，逐张卡片浮现；全景图降级为可选项。
+    """
+    try:
+        kp = eng.dataset.get_kp(kp_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    try:
+        g = eng.graph(kp.grade_band, kp.subject)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    stu = None
+    if student:
+        try:
+            stu = eng.get_student(student)
+        except KeyError:
+            raise HTTPException(404, f"学生不存在：{student}")
+    model = eng.model_for(stu) if stu else None
+    now = time.time()
+
+    def _node(k: Any) -> dict[str, Any]:
+        item = {
+            "id": k.id, "name": k.name,
+            "depth": g.depth(k.id),
+            "kp_type": k.kp_type, "difficulty": k.difficulty,
+        }
+        if model is not None and stu is not None:
+            st = stu.state_of(k.id)
+            p = model.p(st, k, now)
+            thr = eng.config.mastered_for(model.name)
+            item["p_mastery"] = round(p, 3)
+            item["attempts"] = st.attempts
+            item["level"] = ("mastered" if p >= thr
+                             else "learning" if st.attempts else "new")
+        return item
+
+    # chain_to_root 已按 根→叶子 顺序返回
+    chain = [_node(g.kps[_id]) for _id in g.chain_to_root(kp_id)]
+    deps = sorted(g.dependents(kp.id),
+                  key=lambda i: (-g.depth(i), g.kps[i].name))[:12]
+    return {
+        "kp_id": kp.id,
+        "band": kp.grade_band, "subject": kp.subject,
+        "chain": chain,
+        "dependents": [{"id": g.kps[i].id, "name": g.kps[i].name,
+                        "depth": g.depth(i)} for i in deps],
+    }
 
 
 @app.get("/api/kp/{kp_id}")
@@ -265,19 +325,135 @@ def _greedy_components(g, pool: list[str], max_nodes: int) -> set[str]:
     return chosen
 
 
+# ---------------- 账号体系
+
+class RegisterIn(BaseModel):
+    username: str = Field(..., min_length=2, max_length=32)
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+accounts = Accounts(eng.config.db_path)
+
+
+def _set_session(resp: Response, uid: str) -> None:
+    resp.set_cookie(SESSION_COOKIE, accounts.token_for(uid),
+                    max_age=30 * 86400, httponly=True, samesite="lax",
+                    path="/")
+
+
+def require_user(request: Request) -> dict:
+    """无 cookie → 401。前端据此弹登录框；游客走 /api/auth/guest。"""
+    uid = accounts.uid_from_token(request.cookies.get(SESSION_COOKIE))
+    if not uid:
+        raise HTTPException(401, "尚未登录（可先注册，或以游客模式继续）")
+    try:
+        return accounts.require(uid)
+    except KeyError:
+        raise HTTPException(401, "会话已失效，请重新登录")
+
+
+def _writable_student(sid: str, user: dict):
+    """写操作前的归属校验：演示/未归属档案只读，别人的档案按不存在处理。
+
+    归属规则：owner_id == user.id → 可写；owner_id 为空（演示或 CLI 建）→
+    只读；是别人的 → 404（不暴露存在性）。
+    """
+    try:
+        stu = eng.get_student(sid)
+    except KeyError:
+        raise HTTPException(404, "学生不存在")
+    if stu.is_demo or stu.owner_id is None:
+        raise HTTPException(403, "该档案是演示档案，只读。注册后用自己的档案做题")
+    if stu.owner_id != user["id"]:
+        raise HTTPException(404, "学生不存在")
+    return stu
+
+
+@app.post("/api/auth/register")
+def auth_register(body: RegisterIn, resp: Response) -> dict[str, Any]:
+    try:
+        user = accounts.register(body.username, body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    stu = eng.store.create(f"{body.username}的学档", owner_id=user["id"])
+    accounts.bind_student(user["id"], stu.id)
+    user = accounts.require(user["id"])
+    _set_session(resp, user["id"])
+    return {"user": user, "student_id": stu.id}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginIn, resp: Response) -> dict[str, Any]:
+    try:
+        user = accounts.login(body.username, body.password)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
+    if not user["student_id"]:      # 没绑档案的旧账号，绑到自己的第一个档案
+        own = [s for s in eng.store.list_all(user["id"]) if s["owner_id"] == user["id"]]
+        if own:
+            accounts.bind_student(user["id"], own[0]["id"])
+            user = accounts.require(user["id"])
+    _set_session(resp, user["id"])
+    return {"user": user, "student_id": user["student_id"]}
+
+
+@app.post("/api/auth/guest")
+def auth_guest(resp: Response) -> dict[str, Any]:
+    """游客模式：不用注册即可做题。游客档案留在库里，但不可再次登录。"""
+    user = accounts.create_guest()
+    stu = eng.store.create("游客", owner_id=user["id"])
+    accounts.bind_student(user["id"], stu.id)
+    _set_session(resp, user["id"])
+    return {"user": user, "student_id": stu.id}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    uid = accounts.uid_from_token(request.cookies.get(SESSION_COOKIE))
+    if not uid:
+        return {"user": None}
+    try:
+        return {"user": accounts.require(uid)}
+    except KeyError:
+        return {"user": None}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(resp: Response) -> dict[str, Any]:
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
 # ---------------- 学生
 
 @app.post("/api/students")
-def create_student(body: StudentIn) -> dict[str, Any]:
+def create_student(body: StudentIn, user: dict = Depends(require_user)) -> dict[str, Any]:
     if body.model not in ("bkt", "elo"):
         raise HTTPException(400, "model 只能是 bkt 或 elo")
-    stu = eng.create_student(body.name, model=body.model)
+    stu = eng.store.create(body.name, model=body.model, owner_id=user["id"])
+    if not user["student_id"]:
+        accounts.bind_student(user["id"], stu.id)
     return {"id": stu.id, "name": stu.name, "model": stu.model}
 
 
 @app.get("/api/students")
-def list_students() -> list[dict[str, Any]]:
-    return eng.store.list_all()
+def list_students(request: Request) -> list[dict[str, Any]]:
+    """公开全部演示/未归属档案 + 当前登录用户自己的档案。
+
+    每项带 mine / is_demo / owner_id，前端据此区分可编辑与否。
+    """
+    uid = accounts.uid_from_token(request.cookies.get(SESSION_COOKIE))
+    out = []
+    for s in eng.store.list_all(owner_id=uid):
+        item = dict(s)
+        item["mine"] = bool(uid) and s["owner_id"] == uid
+        out.append(item)
+    return out
 
 
 @app.get("/api/students/{sid}")
@@ -308,7 +484,8 @@ def student_overview(sid: str) -> dict[str, Any]:
 # ---------------- 核心动作
 
 @app.post("/api/students/{sid}/attempt")
-def record_attempt(sid: str, body: AttemptIn) -> dict[str, Any]:
+def record_attempt(sid: str, body: AttemptIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    _writable_student(sid, user)
     try:
         r = eng.record_attempt(sid, body.kp_id, body.correct)
     except KeyError as e:
@@ -325,7 +502,11 @@ def record_attempt(sid: str, body: AttemptIn) -> dict[str, Any]:
 
 @app.get("/api/quiz/{kp_id}")
 def make_quiz(kp_id: str, seed: int = 0) -> dict[str, Any]:
-    """出一道题。响应里不含正确答案——判分在 POST /api/students/{sid}/answer 里做。"""
+    """出一道题。响应里不含正确答案——判分在 POST /api/students/{sid}/answer 里做。
+
+    配了 LLM（K12_LLM_*）时走 AI 命题（首次生成需要几秒，结果落缓存），
+    否则/失败时走标注模板，响应里的 source 字段标明来源。
+    """
     try:
         q = eng.make_question(kp_id, seed=seed)
     except KeyError as e:
@@ -336,19 +517,25 @@ def make_quiz(kp_id: str, seed: int = 0) -> dict[str, Any]:
 
 
 @app.post("/api/students/{sid}/answer")
-def answer_quiz(sid: str, body: AnswerIn) -> dict[str, Any]:
+def answer_quiz(sid: str, body: AnswerIn, user: dict = Depends(require_user)) -> dict[str, Any]:
     """提交作答：服务端重建题目判分 → 写入掌握度 → 答错时自动归因。"""
+    _writable_student(sid, user)
     try:
-        return eng.answer_question(sid, body.kp_id, body.seed, body.choice)
+        return eng.answer_question(sid, body.kp_id, body.seed, body.choice,
+                                   qhash=body.qhash)
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
+        # 题目哈希不一致（缓存被清/换了模型）→ 重新拉一道题就能恢复
+        if isinstance(e, QHashMismatch):
+            raise HTTPException(409, str(e))
         raise HTTPException(422, str(e))
 
 
 @app.post("/api/students/{sid}/attempts")
-def record_attempts(sid: str, body: AttemptsIn) -> dict[str, Any]:
+def record_attempts(sid: str, body: AttemptsIn, user: dict = Depends(require_user)) -> dict[str, Any]:
     """批量记录作答：整个批次只写一次档案（逐条记录是 O(n) 次磁盘写）。"""
+    _writable_student(sid, user)
     try:
         results = eng.record_attempts(sid, [(a.kp_id, a.correct) for a in body.attempts])
     except KeyError as e:
@@ -362,7 +549,8 @@ def record_attempts(sid: str, body: AttemptsIn) -> dict[str, Any]:
 
 
 @app.post("/api/students/{sid}/simulate")
-def simulate(sid: str, body: SimulateIn) -> dict[str, Any]:
+def simulate(sid: str, body: SimulateIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    _writable_student(sid, user)
     try:
         results = eng.simulate_learner(sid, body.kp_ids, ability=body.ability,
                                        noise=body.noise, seed=body.seed)
@@ -374,7 +562,8 @@ def simulate(sid: str, body: SimulateIn) -> dict[str, Any]:
 
 
 @app.post("/api/students/{sid}/diagnose")
-def diagnose(sid: str, body: DiagnoseIn) -> dict[str, Any]:
+def diagnose(sid: str, body: DiagnoseIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    _writable_student(sid, user)
     try:
         return eng.diagnose(sid, body.kp_ids).to_dict()
     except KeyError as e:
@@ -387,7 +576,8 @@ def diagnose_recent(sid: str) -> dict[str, Any]:
 
 
 @app.post("/api/students/{sid}/plan")
-def make_plan(sid: str, body: PlanIn) -> dict[str, Any]:
+def make_plan(sid: str, body: PlanIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    _writable_student(sid, user)
     try:
         return eng.make_plan(sid, body.goal_id).to_dict()
     except KeyError as e:

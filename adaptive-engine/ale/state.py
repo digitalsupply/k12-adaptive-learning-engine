@@ -55,6 +55,10 @@ class Student:
     def state_of(self, kp_id: str) -> MasteryState:
         return self.mastery.get(kp_id) or MasteryState()
 
+    # 归属：None=未归属（演示/CLI 创建），账号体系建立后由 SQLite store 填写
+    owner_id: str | None = None
+    is_demo: bool = False
+
 
 class _FileLock:
     """基于 fcntl.flock 的跨进程文件锁；fcntl 不可用时退化为空操作。"""
@@ -117,6 +121,7 @@ class StudentStore:
             attempts=[Attempt(**a) for a in raw.get("attempts", [])],
             reviews={k: ReviewItem(**v) for k, v in raw.get("reviews", {}).items()},
             current_goals=raw.get("current_goals", {}),
+            owner_id=raw.get("owner_id"), is_demo=bool(raw.get("is_demo")),
         )
 
     def save(self, stu: Student) -> None:
@@ -137,6 +142,7 @@ class StudentStore:
             "attempts": [asdict(a) for a in stu.attempts],
             "reviews": {k: asdict(v) for k, v in stu.reviews.items()},
             "current_goals": stu.current_goals,
+            "owner_id": stu.owner_id, "is_demo": stu.is_demo,
         }
         target = self._path(stu.id)
         tmp = target.with_suffix(".json.tmp")

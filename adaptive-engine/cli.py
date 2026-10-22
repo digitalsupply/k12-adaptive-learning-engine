@@ -18,10 +18,16 @@
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
+from ale import quiz
 from ale.engine import AdaptiveEngine
+from ale import llm
+from ale.llm import load_dotenv
+
+load_dotenv()
 
 eng = AdaptiveEngine()
 
@@ -170,6 +176,38 @@ def cmd_reviews(a):
         print(f"  · {kp.name}  间隔 {r.interval_days:.0f} 天  第 {r.reps} 次复习")
 
 
+def cmd_llm_check(a):
+    """LLM 出题链路质检：连通 → 出一道真题展示。"""
+    client = eng.llm
+    cfg = client.config
+    if not cfg.enabled:
+        print("LLM 未启用：请在 adaptive-engine/.env 配置三行（OpenAI 兼容）：")
+        for p, default in (("base_url", "https://api.deepseek.com/v1"),
+                           ("api_key", "sk-..."), ("model", "deepseek-chat")):
+            print(f"  K12_LLM_{p.upper()} = {default}")
+        print("可共用 known providers：" + " / ".join(
+            f"{k}({v['model']})" for k, v in llm.KNOWN_PROVIDERS.items()))
+        raise SystemExit(2)
+    print(f"Provider：{cfg.base_url}  model={cfg.model}")
+    try:
+        reply = client.chat("你是回音壁。只回复两个汉字：正常", "测试", temperature=0.0,
+                            max_tokens=8)
+        print(f"连通性：✓（回复：{reply[:20]}）")
+    except llm.LLMError as e:
+        print(f"连通性：✗  {e}")
+        raise SystemExit(1)
+    # 出一道真题（LLM → 缓存 → 模板）
+    kps = list(eng.dataset.group(a.band, a.subject)[0].values())
+    askable = [k for k in kps if quiz.can_ask(k)]
+    random.Random(a.seed).shuffle(askable)
+    q = eng.make_question(askable[0].id, seed=a.seed)
+    src = q.source
+    print(f"\n示例题[{src}] {q.kp_name}")
+    print(f"  {q.prompt}")
+    for i, o in enumerate(q.options):
+        print(f"   {'✓' if i == q.answer_index else ' '} {chr(65+i)}. {o}")
+
+
 def cmd_prebuild_index(_a):
     """预热派生索引（id→分组、名称→id），避免首次请求时全量扫描数据集。"""
     src = eng.dataset.rebuild_indexes()
@@ -186,6 +224,11 @@ def main():
 
     sub.add_parser("groups").set_defaults(fn=cmd_groups)
     sub.add_parser("prebuild-index").set_defaults(fn=cmd_prebuild_index)
+
+    p = sub.add_parser("llm-check")
+    p.add_argument("--band", default="初中"); p.add_argument("--subject", default="数学")
+    p.add_argument("--seed", type=int, default=1)
+    p.set_defaults(fn=cmd_llm_check)
 
     p = sub.add_parser("search"); p.add_argument("keyword")
     p.add_argument("--band"); p.add_argument("--subject"); p.add_argument("--limit", type=int, default=15)

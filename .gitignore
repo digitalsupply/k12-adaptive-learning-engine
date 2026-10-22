@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# 运行时产物：数据库、密钥、缓存，一律不进仓库
+adaptive-engine/data/
+adaptive-engine/.env
+adaptive-engine/web/figures.json.tmp

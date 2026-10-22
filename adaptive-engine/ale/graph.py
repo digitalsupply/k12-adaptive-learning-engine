@@ -246,6 +246,10 @@ class KnowledgeGraph:
 
     # ---------------- 统计
 
+    def dependents(self, kp_id: str) -> set[str]:
+        """直接以 kp_id 为先修的知识点（链视图的"下游"=end）。"""
+        return set(self.dependents_of.get(kp_id, ()))
+
     def hubs(self, top_n: int = 10) -> list[tuple[str, int]]:
         """被依赖最多的前置知识点 = 教学枢纽。"""
         counted = {kp_id: len(deps) for kp_id, deps in self.dependents_of.items()}

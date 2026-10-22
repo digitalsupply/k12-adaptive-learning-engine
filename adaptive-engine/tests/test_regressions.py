@@ -404,11 +404,13 @@ def test_config_endpoint_exposes_thresholds(api):
 
 
 def test_batch_attempts_endpoint(api):
-    """批量作答：一次请求写一次档案。"""
-    sid = api.create_student(api.StudentIn(name="批量", model="bkt"))["id"]
+    """批量作答：一次请求写一次档案。（直调端点，user 显式给出）"""
+    user = {"id": "直调测试用户", "student_id": ""}
+    sid = api.create_student(api.StudentIn(name="批量", model="bkt"),
+                             user=user)["id"]
     kps = list(api.eng.dataset.group("初中", "数学")[0])[:5]
     body = api.AttemptsIn(attempts=[api.AttemptIn(kp_id=k, correct=True) for k in kps])
-    out = api.record_attempts(sid, body)
+    out = api.record_attempts(sid, body, user=user)
     assert out["count"] == 5
     assert out["correct"] == 5
     stu = api.eng.get_student(sid)
@@ -419,27 +421,29 @@ def test_batch_attempts_endpoint(api):
 
 
 def test_simulate_learner_writes_once_per_batch(real_config, tmp_path):
-    """模拟 N 题只落盘一次（不是 N 次全量 JSON 重写）。"""
-    from ale.state import StudentStore
+    """模拟 N 题只写一次档案（不是 N 次全量重写）。对两种后端都成立。"""
     cfg = Config(data_dir=real_config.data_dir, cache_dir=tmp_path,
-                 students_dir=tmp_path / "students")
+                 students_dir=tmp_path / "students",
+                 store_backend="sqlite",
+                 db_path=tmp_path / "app.db")
     eng = AdaptiveEngine(cfg)
 
     writes = []
-    orig_save = StudentStore._save_unlocked
+    store_cls = type(eng.store)
+    orig_save = store_cls.save
 
     def counting_save(self, stu):
         writes.append(stu.id)
         return orig_save(self, stu)
 
-    StudentStore._save_unlocked = counting_save
+    store_cls.save = counting_save
     try:
         sid = eng.create_student("写次数").id
         writes.clear()                      # 建学生那一次不算
         kps = sorted(eng.dataset.group("初中", "数学")[0])[:20]
         eng.simulate_learner(sid, kps, seed=1)
     finally:
-        StudentStore._save_unlocked = orig_save
+        store_cls.save = orig_save
 
     assert len(writes) == 1, f"20 题模拟应只写 1 次，实际写了 {len(writes)} 次"
     assert len(eng.get_student(sid).attempts) == 20
