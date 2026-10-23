@@ -76,6 +76,12 @@ class Classroom:
                     PRIMARY KEY(assignment_id, uid, item)
                 );
             """)
+            # 角色自选迁移：已创建过班级的老账号回填为教师角色
+            cols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
+            if "role" in cols:
+                con.execute(
+                    "UPDATE users SET role='teacher' WHERE role='student'"
+                    " AND id IN (SELECT owner_uid FROM classes)")
 
     # ---------------- 建班 / 加入 / 我的班级 ----------------
 

@@ -100,11 +100,19 @@ class Accounts:
                     student_id    TEXT,
                     created_ts    REAL
                 )""")
+            # 角色自选（师生平等）：老库补列,默认学生
+            cols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
+            if "role" not in cols:
+                con.execute("ALTER TABLE users ADD COLUMN role TEXT"
+                            " NOT NULL DEFAULT 'student'")
 
     # ---------------- 注册 / 登录 ----------------
 
-    def register(self, username: str, password: str) -> dict:
-        """注册并返回 user 行。用户名已存在抛 ValueError。"""
+    def register(self, username: str, password: str,
+                 role: str = "student") -> dict:
+        """注册并返回 user 行。用户名已存在抛 ValueError。角色自选："""
+        if role not in ("teacher", "student"):
+            raise ValueError("角色只能是 teacher（教师）或 student（学生）")
         username = (username or "").strip()
         if not (2 <= len(username) <= 32):
             raise ValueError("用户名长度需在 2~32 字之间")
@@ -117,8 +125,8 @@ class Accounts:
             with self._conn() as con:
                 con.execute(
                     "INSERT INTO users(id, username, password_hash, salt,"
-                    " is_guest, created_ts) VALUES(?,?,?,?,0,?)",
-                    (uid, username, phash, salt.hex(), time.time()))
+                    " is_guest, role, created_ts) VALUES(?,?,?,?,0,?,?)",
+                    (uid, username, phash, salt.hex(), role, time.time()))
         except sqlite3.IntegrityError:
             raise ValueError(f"用户名已被占用：{username}")
         return self.require(uid)
@@ -165,12 +173,23 @@ class Accounts:
             con.execute("UPDATE users SET student_id=? WHERE id=?",
                         (student_id, uid))
 
+    def set_role(self, uid: str, role: str) -> dict:
+        """切换自选角色（师生平等，随时可换）。返回更新后的 user。"""
+        if self.get(uid) is None:
+            raise KeyError(f"用户不存在：{uid}")
+        if role not in ("teacher", "student"):
+            raise ValueError("角色只能是 teacher（教师）或 student（学生）")
+        with self._conn() as con:
+            con.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
+        return self.require(uid)
+
     @staticmethod
     def _row(row) -> dict:
         return {
             "id": row["id"], "username": row["username"],
             "is_guest": bool(row["is_guest"]),
             "student_id": row["student_id"],
+            "role": row["role"] if "role" in row.keys() else "student",
             "created_ts": row["created_ts"],
         }
 

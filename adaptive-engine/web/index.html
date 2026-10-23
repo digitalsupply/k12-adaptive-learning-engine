@@ -6,7 +6,7 @@
 <title>K12 自适应学习引擎</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%2321618c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/static/style.css?v=13">
+<link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body>
 <header>
@@ -17,6 +17,7 @@
       <button id="llmBtn" class="hidden" title="AI 出题服务的地址、密钥与模型">⚙ LLM 设置</button>
       <button id="classBtn" class="hidden" title="班级管理与作业布置">🏫 班级</button>
       <button id="reviewBtn" class="hidden" title="审题台：抽 AI 题预览，通过的进精选题库优先复用">✅ 审题</button>
+      <button id="roleBtn" class="hidden" title="切换角色（师生平等，随时可换）">🎒 学生</button>
       <button id="loginBtn">登录 / 注册</button>
       <button id="logoutBtn" class="hidden">退出</button>
     </div>
@@ -191,6 +192,11 @@
     </div>
     <label>用户名<input id="authUser" placeholder="2~32 个字" autocomplete="username"></label>
     <label>密码<input id="authPass" type="password" placeholder="至少 6 位" autocomplete="current-password"></label>
+    <div id="rolePick" class="role-pick hidden">
+      <span class="tiny dim">我的角色（随时可换）：</span>
+      <label class="role-opt"><input type="radio" name="regRole" value="student" checked>🎒 学生 · 自适应学习</label>
+      <label class="role-opt"><input type="radio" name="regRole" value="teacher">🧑‍🏫 教师 · 教材脉络与学情</label>
+    </div>
     <button id="authSubmit" class="primary wide">登录</button>
     <button id="authGuest" class="wide">先逛逛（游客模式，可完整体验）</button>
     <div id="authErr" class="auth-err hidden"></div>
@@ -216,6 +222,6 @@
 
 <script defer src="/static/vendor/katex/katex.min.js"></script>
 <script defer src="/static/vendor/katex/contrib/auto-render.min.js"></script>
-<script defer src="/static/app.js?v=13"></script>
+<script defer src="/static/app.js?v=14"></script>
 </body>
 </html>

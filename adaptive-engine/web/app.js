@@ -67,24 +67,54 @@ async function refreshAuth() {
 
 function renderAuthBar() {
   const who = $("authWho"), loginBtn = $("loginBtn"), llmBtn = $("llmBtn");
+  const roleBtn = $("roleBtn");
   if (state.user) {
     who.classList.remove("hidden");
     who.textContent = state.user.is_guest
       ? "游客模式 · 数据不长期保留"
-      : state.user.username;
-    who.title = state.user.is_guest ? "注册后数据可长期保存" : "";
+      : `${state.user.username}`;
+    who.title = state.user.is_guest ? "注册后数据可长期保存"
+      : (state.user.role === "teacher" ? "教师视角：教材脉络 · 班级学情" : "学生视角：自适应学习 · 自我巩固");
     loginBtn.classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
-    // LLM 设置与班级/审题台是长期数据：注册用户可见，游客隐藏
+    // 角色按钮(自选角色,师生平等,随时切换)
+    if (!state.user.is_guest) {
+      roleBtn.classList.remove("hidden");
+      roleBtn.textContent = state.user.role === "teacher" ? "🧑‍🏫 教师" : "🎒 学生";
+      roleBtn.title = "点击切换角色（师生平等，随时可换）";
+    } else {
+      roleBtn.classList.add("hidden");
+    }
+    // 视角下发：审题台是教师专属；班级两方都进（学生=加入+做作业,教师=建班+布置+学情）
     llmBtn.classList.toggle("hidden", !!state.user.is_guest);
     $("classBtn").classList.toggle("hidden", !!state.user.is_guest);
-    $("reviewBtn").classList.toggle("hidden", !!state.user.is_guest);
+    $("reviewBtn").classList.toggle("hidden",
+      !!state.user.is_guest || state.user.role !== "teacher");
   } else {
     who.classList.add("hidden");
+    roleBtn.classList.add("hidden");
     loginBtn.classList.remove("hidden");
     $("logoutBtn").classList.add("hidden");
     llmBtn.classList.add("hidden");
+    $("classBtn").classList.add("hidden");
+    $("reviewBtn").classList.add("hidden");
   }
+}
+
+/* 切换自选角色：教师⇄学生,立即生效并重渲染入口 */
+async function switchRole() {
+  if (!state.user || state.user.is_guest) return;
+  const next = state.user.role === "teacher" ? "student" : "teacher";
+  const ok = window.confirm(next === "teacher"
+    ? "切换为「教师」视角？将开放建班、布置作业、审题台等权限。"
+    : "切换为「学生」视角？以自学为主,提交的修订需教师放行。");
+  if (!ok) return;
+  try {
+    const r = await post("/api/auth/role", { role: next });
+    state.user = r.user;
+    renderAuthBar();
+    showError(`已切换为${next === "teacher" ? "🧑‍🏫 教师" : "🎒 学生"}视角。`);
+  } catch (e) { showError(e.message); }
 }
 
 let authMode = "login";
@@ -97,6 +127,7 @@ function openAuth(mode = "login", notice = "") {
   $("authErr").classList.toggle("hidden", !notice);
   $("authErr").textContent = notice || "";
   $("authUser").value = ""; $("authPass").value = "";
+  $("rolePick").classList.toggle("hidden", mode !== "register");
   $("authModal").classList.remove("hidden");
   $("authUser").focus();
 }
@@ -107,11 +138,16 @@ async function authSubmit() {
   const password = $("authPass").value;
   try {
     const path = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
-    const r = await post(path, { username, password });
+    const payload = { username, password };
+    if (authMode === "register") {
+      const sel = document.querySelector("input[name=regRole]:checked");
+      payload.role = sel ? sel.value : "student";
+    }
+    const r = await post(path, payload);
     state.user = r.user;
     closeAuth();
     await reloadSession();
-    showError(`欢迎，${state.user.username}！已切换到你的学习档案。`);
+    showError(`欢迎，${state.user.username}！已切换到你的${state.user.role === "teacher" ? "教师" : "学生"}视图。`);
   } catch (e) {
     $("authErr").classList.remove("hidden");
     $("authErr").textContent = e.message;
@@ -499,8 +535,11 @@ async function renderClassList() {
       </div>
       <button data-open="${esc(c.id)}">${c.assignments > 0 ? "进入" : "查看"}</button>
     </div>`).join("") || `<div class="tiny dim">还没有班级。教师可以新建，学生凭邀请码加入。</div>`;
+  const isTeacher = state.user && state.user.role === "teacher";
   body.innerHTML = `
+    <div>
     ${rows}
+    ${isTeacher ? `
     <div class="cls-actions">
       <div>
         <input id="clsNewName" placeholder="新班级名称（1~32 字）">
@@ -510,8 +549,17 @@ async function renderClassList() {
         <input id="clsJoinCode" placeholder="6 位邀请码" maxlength="8">
         <button id="clsJoin">加入班级</button>
       </div>
+    </div>` : `
+    <div class="cls-actions">
+      <div>
+        <input id="clsJoinCode" placeholder="6 位邀请码" maxlength="8">
+        <button id="clsJoin">加入班级</button>
+      </div>
+    </div>
+    <div class="tiny dim" style="margin-top:2px">想建班当教师？点右上角「🧑‍🏫 教师」切换角色。</div>`}
     </div>`;
-  $("clsCreate").onclick = async () => {
+  const createBtn = $("clsCreate");
+  if (createBtn) createBtn.onclick = async () => {
     try {
       const c = await post("/api/classes", { name: $("clsNewName").value });
       classDraft = [];
@@ -796,6 +844,9 @@ async function init() {
   $("revDraw").onclick = revDraw;
   $("revList").onclick = revListCurated;
   $("revPending").onclick = revListPending;
+
+  /* ---- 角色切换绑定 ---- */
+  $("roleBtn").onclick = switchRole;
 
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);

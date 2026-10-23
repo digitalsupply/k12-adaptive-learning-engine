@@ -325,6 +325,13 @@ button.subtle:hover { border-color: #b9c2cc; color: #6b7480; }
 /* 人工修订编辑器（师生共建） */
 .q-actions { margin-top: 8px; border-top: 1px dashed #e3e8ee; padding-top: 6px;
   display: flex; gap: 12px; }
+
+/* 角色选择 / 角色按钮 */
+.role-pick { margin: 4px 0 2px; }
+.role-pick .role-opt { display: flex; gap: 6px; align-items: center;
+  margin: 3px 0; font-size: 12.5px; cursor: pointer; }
+.role-pick input { margin: 0; }
+button#roleBtn { font-size: 11.5px; padding: 4px 8px; height: auto; align-self: center; }
 .q-actions a { font-size: 11.5px; color: var(--muted); cursor: pointer; text-decoration: none; }
 .q-actions a:hover { color: #21618c; text-decoration: underline; }
 .rev-card textarea, .rev-card input { font: inherit; font-size: 13px; width: 100%;

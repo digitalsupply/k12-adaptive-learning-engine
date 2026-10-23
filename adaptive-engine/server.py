@@ -408,6 +408,12 @@ def _greedy_components(g, pool: list[str], max_nodes: int) -> set[str]:
 class RegisterIn(BaseModel):
     username: str = Field(..., min_length=2, max_length=32)
     password: str = Field(..., min_length=6, max_length=128)
+    role: str = Field(default="student", pattern="^(teacher|student)$")
+
+
+class RoleIn(BaseModel):
+    """自选角色：师生平等，随时切换。"""
+    role: str = Field(..., pattern="^(teacher|student)$")
 
 
 class LoginIn(BaseModel):
@@ -461,6 +467,14 @@ def _registered_user(user: dict) -> None:
         raise HTTPException(403, "游客模式不能参与班级，请注册后再来（数据可长期保存）")
 
 
+def _require_role(user: dict, role: str, verb: str) -> None:
+    """自选角色的功能门禁：师生平等，切换角色即可获得对应入口。"""
+    if user.get("role") != role:
+        raise HTTPException(
+            403, f"{verb}面向「{'教师' if role == 'teacher' else '学生'}」角色："
+                 "可在右上角的角色按钮里随时切换")
+
+
 def _classroom_error(e: Exception) -> HTTPException:
     if isinstance(e, PermissionError):
         return HTTPException(403, str(e))
@@ -473,6 +487,7 @@ def _classroom_error(e: Exception) -> HTTPException:
 def create_class(body: ClassIn, user: dict = Depends(require_user)) -> dict[str, Any]:
     """建班：创建者即教师（owner），自动成为第一位成员。"""
     _registered_user(user)
+    _require_role(user, "teacher", "建班")
     try:
         return classroom.create_class(user["id"], body.name)
     except ValueError as e:
@@ -603,8 +618,7 @@ def _require_reviewer(user: dict) -> None:
     质量闸门就形同虚设。
     """
     _registered_user(user)
-    if not classroom.owned_classes(user["id"]):
-        raise HTTPException(403, "审题台面向教师：请先在「🏫 班级」面板新建一个班级")
+    _require_role(user, "teacher", "审题台")
 
 
 @app.post("/api/review/preview")
@@ -723,7 +737,7 @@ def review_submit_edit(body: ReviewEditIn,
                  explain=explain, objective=q0.objective,
                  misconception=q0.misconception,
                  source="curated", model=(q0.model or "manual") + "+人工修订")
-    is_teacher = bool(classroom.owned_classes(user["id"])) and not body.flag
+    is_teacher = user.get("role") == "teacher" and not body.flag
     status = "approved" if is_teacher else "pending"
     row = eng.curated.upsert(q, status, reviewer=reviewer, note=note)
     if status == "approved":
@@ -847,7 +861,7 @@ def llm_test(body: LLMSettingsIn, user: dict = Depends(require_user)) -> dict[st
 @app.post("/api/auth/register")
 def auth_register(body: RegisterIn, resp: Response) -> dict[str, Any]:
     try:
-        user = accounts.register(body.username, body.password)
+        user = accounts.register(body.username, body.password, role=body.role)
     except ValueError as e:
         raise HTTPException(400, str(e))
     stu = eng.store.create(f"{body.username}的学档", owner_id=user["id"])
@@ -870,6 +884,17 @@ def auth_login(body: LoginIn, resp: Response) -> dict[str, Any]:
             user = accounts.require(user["id"])
     _set_session(resp, user["id"])
     return {"user": user, "student_id": user["student_id"]}
+
+
+@app.post("/api/auth/role")
+def auth_set_role(body: RoleIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    """自选角色切换：师生平等，随时可换（游客不可）。"""
+    if user.get("is_guest"):
+        raise HTTPException(403, "游客模式没有角色概念，请注册后再来")
+    try:
+        return {"user": accounts.set_role(user["id"], body.role)}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.post("/api/auth/guest")
