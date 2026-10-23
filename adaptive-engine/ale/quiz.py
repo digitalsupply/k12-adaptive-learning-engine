@@ -108,6 +108,7 @@ class Question:
         out = {
             "question_id": self.question_id,
             "kp_id": self.kp_id,
+            "seed": self.seed,          # 前端答题回传用；qhash 绑定 (kp|seed|options)
             "kp_name": self.kp_name,
             "kind": self.kind,
             "prompt": self.prompt,

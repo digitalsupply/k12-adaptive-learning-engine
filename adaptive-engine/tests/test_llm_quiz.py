@@ -276,3 +276,28 @@ def test_answer_bank_scores_when_cache_lost(engine):
     # 答案库也没有的 qhash → 才是真正题目刷新，409
     with pytest.raises(QHashMismatch):
         engine.answer_question(sid, kp.id, 78, 0, qhash="0123456789abcdef")
+
+
+def test_answer_bank_survives_missing_seed(engine):
+    """客户端把 seed 填 0（如旧响应没有 seed 字段）→ 仍按 qhash 判分给解析。"""
+    kps, _ = engine.dataset.group("初中", "数学")
+    kp = next(k for k in kps.values() if quiz.can_ask(k))
+    sid = engine.create_student("漏发seed").id
+    jhash = "abcd00ef56781234"
+    engine._qbank.rows[jhash] = {
+        "qhash": jhash, "kp_id": kp.id, "seed": 667, "model": "stub-1",
+        "answer_index": 3, "explain": "正确答案是 D，因为……",
+        "objective": None, "misconception": None, "kind": "choice", "saved_ts": 0,
+    }
+    # seed 传 0（等于 AnswerIn 的默认值）→ 不应 409，应按 qhash 从答案库判分
+    r = engine.answer_question(sid, kp.id, 0, 3, qhash=jhash)
+    assert r["correct"] is True and "正确答案" in r["explain"]
+    r2 = engine.answer_question(sid, kp.id, 0, 1, qhash=jhash)
+    assert r2["correct"] is False
+
+
+def test_quiz_to_dict_carries_seed():
+    q = quiz.Question(kp_id="kp1", kp_name="x", seed=5, kind="choice",
+                      prompt="t", options=["a", "b"], answer_index=0,
+                      explain="e")
+    assert q.to_dict()["seed"] == 5

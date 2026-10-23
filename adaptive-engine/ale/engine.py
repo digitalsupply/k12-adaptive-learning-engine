@@ -284,9 +284,10 @@ class AdaptiveEngine:
         question = fallback = None
         if qhash is not None:
             fallback = self._qbank.get(qhash)
-            # qhash 绑定 (kp_id, seed, options)，这里只做双保险
-            if fallback is not None and (fallback.get("kp_id") != kp_id
-                                         or int(fallback.get("seed", -1)) != seed):
+            # qhash 绑定 (kp_id, seed, options)，只要核对 kp_id 即可：
+            # 有些客户端会漏发/错发 seed（默认为 0），若把 seed 也拿来
+            # 校验，反而会把账面正确的作答拒成 409。
+            if fallback is not None and fallback.get("kp_id") != kp_id:
                 fallback = None
         try:
             question = self.make_question(kp_id, seed=seed, for_answer=True)
