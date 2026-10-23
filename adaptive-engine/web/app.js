@@ -1478,8 +1478,8 @@ async function refreshGraphData() {
   if (state.selected) await loadChain(state.selected);
 }
 
-$("btnAsk").onclick = askQuestion;
-$("btnNextQ").onclick = askQuestion;
+$("btnAsk").onclick = () => askQuestion();
+$("btnNextQ").onclick = () => askQuestion();
 $("btnCorrect").onclick = () => recordSelfAssess(true);
 $("btnWrong").onclick = () => recordSelfAssess(false);
 
