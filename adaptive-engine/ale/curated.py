@@ -70,8 +70,12 @@ class CuratedStore:
 
     def upsert(self, q: Question, status: str, reviewer: str,
                note: str = "") -> dict:
-        """登记一次审定。同一题重复审 → 覆盖状态与批注（保留最新决定）。"""
-        if status not in ("approved", "rejected"):
+        """登记一次审定/修订。同一题重复审 → 覆盖状态与批注。
+
+        status: approved（直接入库并参与出题复用）/ pending（学生等
+        非教师提交的修订，待教师审）/ rejected（驳回或下架）。
+        """
+        if status not in ("approved", "rejected", "pending"):
             raise ValueError(f"未知的审定状态：{status}")
         payload = {f: getattr(q, f) for f in _FIELDS}
         with self._conn() as con:
@@ -137,6 +141,7 @@ class CuratedStore:
         with self._conn() as con:
             got = dict(con.execute(q, args).fetchall())
         return {"approved": got.get("approved", 0),
+                "pending": got.get("pending", 0),
                 "rejected": got.get("rejected", 0)}
 
     def recent(self, status: str | None = None, kp_id: str | None = None,
@@ -172,6 +177,20 @@ class CuratedStore:
                             "answer_index": p.get("answer_index"),
                             "explain": p.get("explain", "")})
         return out
+
+    def to_question(self, qhash: str, seed: int | None = None) -> Question | None:
+        """按 qhash 取回存的题（含答案）。seed=None 用入库时的原 seed。"""
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT payload, origin_seed FROM curated_questions"
+                " WHERE qhash=?", (qhash,)).fetchone()
+        if not row:
+            return None
+        try:
+            raw = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        return _from_payload(raw, seed=row[1] if seed is None else seed)
 
     def unapprove(self, qhash: str, reviewer: str) -> dict | None:
         """下架：精选题不再参与出题复用（保留记录，状态改 rejected）。"""

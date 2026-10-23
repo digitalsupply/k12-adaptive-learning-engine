@@ -20,7 +20,8 @@ from ale.accounts import SESSION_COOKIE, Accounts
 from ale.classroom import Classroom
 from ale.config import FIGURES_DIR, WEB_DIR
 from ale.engine import AdaptiveEngine, QHashMismatch
-from ale.quiz import NoQuestionError as QNoQuestion
+from ale.quiz import NoQuestionError as QNoQuestion, Question
+from ale import quiz as _quiz
 from ale.figures import FigureRegistry
 from ale.llm import (KNOWN_PROVIDERS, LLMClient, LLMConfig, LLMError,
                      load_dotenv, probe_chat, save_llm_config)
@@ -107,6 +108,28 @@ class ReviewDecideIn(BaseModel):
 
 class ReviewUnapproveIn(BaseModel):
     qhash: str
+
+
+class ReviewDecideEditIn(BaseModel):
+    qhash: str
+    approve: bool
+
+
+class ReviewEditIn(BaseModel):
+    """师生对某道已生成题目的人工修订/标记。
+
+    answer_index/explain 传 None = 保持原题不动；学生提交一律进 pending
+    待教师审，教师提交直接 approved 入库。
+    """
+    kp_id: str
+    seed: int = Field(..., ge=0, lt=1_000_000)
+    qhash: str
+    prompt: str
+    options: list[str] = Field(..., min_length=2, max_length=6)
+    answer_index: int | None = Field(default=None, ge=0)
+    explain: str | None = None
+    note: str = ""
+    flag: bool = False          # true = 只标记问题（不改动内容）
 
 
 class DiagnoseIn(BaseModel):
@@ -647,6 +670,94 @@ def review_unapprove(body: ReviewUnapproveIn,
     if row is None:
         raise HTTPException(404, "未找到该精选题（可能已下架）")
     return {"qhash": row["qhash"], "status": row["status"],
+            "counts": eng.curated.counts(row["kp_id"])}
+
+
+@app.post("/api/review/submit-edit")
+def review_submit_edit(body: ReviewEditIn,
+                       user: dict = Depends(require_user)) -> dict[str, Any]:
+    """师生共同维护题库：对当前正在做的题提交人工修订/标记。
+
+    - 以 qhash 锁定原题（服务端只读缓存重建核对，不符 409），杜绝「改的
+      不是看到的题」；
+    - 教师（班级创建者）提交 → 直接 approved 入精选题库并可被后续出题
+      复用；学生提交 → pending 待审，教师在审题台放行；
+    - answer_index/explain 传 None：保持原题答案/解析不动（前端拿不到
+      答案时——比如还没答题——就选这个）。
+    """
+    if user.get("is_guest"):
+        raise HTTPException(403, "游客模式不能参与题库共建，请注册后再来")
+    prompt = body.prompt.strip()
+    options = [o.strip() for o in body.options if o.strip()]
+    if len(prompt) < 4:
+        raise HTTPException(422, "题干太短")
+    if len(options) != len(body.options):
+        raise HTTPException(422, "选项不能留空")
+    if len(set(options)) != len(options):
+        raise HTTPException(422, "选项内容重复")
+    origin = None
+    if body.qhash:
+        origin = eng.curated.to_question(body.qhash)
+    try:
+        q0 = eng.make_question(body.kp_id, seed=body.seed, for_answer=True)
+    except QNoQuestion as e:
+        raise HTTPException(422, f"该题已无法重建：{e}")
+    if q0.qhash != body.qhash and origin is None:
+        raise HTTPException(409, "题目已刷新，请回到当前题再提交")
+    kind = q0.kind
+    if kind == "judge":
+        options = options[:2] if len(options) > 2 else options
+        if len(options) != 2:
+            raise HTTPException(422, "判断题需两个选项")
+    ans = q0.answer_index if body.answer_index is None else body.answer_index
+    if not (0 <= ans < len(options)):
+        raise HTTPException(422, f"正确项序号越界：{ans}")
+    explain = q0.explain if body.explain is None else body.explain.strip()
+    note = (body.note or "")[:200]
+    if body.flag:
+        note = ("🚩 标记：" if note.startswith("🚩") else f"🚩 标记：{note}") if note else "🚩 标记：此题有问题"
+    reviewer = user.get("username") or ""
+    kp = eng.dataset.get_kp(body.kp_id)
+    q = Question(kp_id=body.kp_id, kp_name=kp.name, seed=body.seed,
+                 kind=kind, prompt=prompt, options=options, answer_index=ans,
+                 explain=explain, objective=q0.objective,
+                 misconception=q0.misconception,
+                 source="curated", model=(q0.model or "manual") + "+人工修订")
+    is_teacher = bool(classroom.owned_classes(user["id"])) and not body.flag
+    status = "approved" if is_teacher else "pending"
+    row = eng.curated.upsert(q, status, reviewer=reviewer, note=note)
+    if status == "approved":
+        eng._qbank.put(q)      # 修订版答案也进答案库
+        _quiz.write_cache(eng.config.quiz_cache_dir, kp, body.seed,
+                          eng.llm.config.model if eng.llm else "", q)
+    return {**row, "is_teacher": bool(classroom.owned_classes(user["id"])),
+            "counts": eng.curated.counts(body.kp_id)}
+
+
+@app.get("/api/review/pending")
+def review_pending(user: dict = Depends(require_user)) -> dict[str, Any]:
+    """待教师放行的学生修订/标记。"""
+    _require_reviewer(user)
+    return {"items": eng.curated.recent(status="pending", limit=50)}
+
+
+@app.post("/api/review/decide-edit")
+def review_decide_edit(body: ReviewDecideEditIn,
+                       user: dict = Depends(require_user)) -> dict[str, Any]:
+    """教师对一条待审修订放行/驳回：放行即 approved，驳回即 rejected。"""
+    _require_reviewer(user)
+    row = eng.curated.get(body.qhash)
+    if row is None or row["status"] != "pending":
+        raise HTTPException(404, "未找到该待审修订（可能已处理）")
+    q = eng.curated.to_question(body.qhash)
+    if q is None:
+        raise HTTPException(422, "该修订的数据损坏，请驳回")
+    status = "approved" if body.approve else "rejected"
+    eng.curated.upsert(q, status, reviewer=user.get("username") or "",
+                       note=row["note"])
+    if body.approve:
+        eng._qbank.put(q)
+    return {"qhash": body.qhash, "status": status,
             "counts": eng.curated.counts(row["kp_id"])}
 
 

@@ -259,7 +259,7 @@ async function refreshReviewStats() {
   try {
     const r = await api("/api/review/curated?limit=1");
     $("reviewStats").textContent =
-      `精选题库：通过 ${r.counts.approved} · 驳回 ${r.counts.rejected}`;
+      `精选题库：通过 ${r.counts.approved} · 待审 ${r.counts.pending || 0} · 驳回 ${r.counts.rejected}`;
   } catch (_) {
     $("reviewStats").textContent = "";     // 非教师（403）等场景静默
   }
@@ -366,6 +366,101 @@ async function revListCurated() {
       };
     });
   } catch (e) { showError(e.message); }
+}
+
+/* 师生共建题库：对当前正在做的题「修改/标记」→ 提交入库。
+   教师（班级创建者）直接入库；学生提交进 pending 待教师放行。 */
+function openRevEdit(q, flagMode) {
+  if (!q || !state.user) return;
+  if (state.user.is_guest) { showError("游客不能参与题库共建，请注册后再来"); return; }
+  const letters = "ABCDEF";
+  // 已知正确项？判定:教师预览的题带 answer_index;正在练的题不带
+  const knownAnswer = Number.isInteger(q.answer_index);
+  const nOpts = q.options.length;
+  document.body.classList.add("modal-open");
+  $("reviewModal").classList.remove("hidden");
+  $("reviewStats").textContent = flagMode
+    ? "🚩 标记模式：不改内容，把问题留给教师（题面不清/答案可疑/超纲/选项雷同…）"
+    : "✏️ 修订模式：改完后教师提交即入库；学生提交进待审队列";
+  $("revKpCur").textContent = `对象：${q.kp_name} · seed ${q.seed}`;
+  $("revBody").innerHTML = `
+    <div class="rev-card">
+      <div class="tiny dim">原题干（可直接修改）：</div>
+      <textarea id="rePrompt" rows="4">${esc(q.prompt)}</textarea>
+      <div class="tiny dim" style="margin-top:6px">选项（每行一个，保持风格统一）：</div>
+      ${q.options.map((o, i) => `
+        <div class="re-opt">
+          <label><input type="radio" name="reAns" value="${i}" ${knownAnswer && i === q.answer_index ? "checked" : ""}>${letters[i]}</label>
+          <textarea id="reOpt${i}" rows="2">${esc(o)}</textarea>
+        </div>`).join("")}
+      <label class="tiny re-keep"><input type="radio" name="reAns" value="keep" ${knownAnswer ? "" : "checked"}>保持原答案${knownAnswer ? "（当前是 " + letters[q.answer_index] + "）" : ""}</label>
+      <div class="tiny dim" style="margin-top:6px">解析（留空 = 保持原解析；教师修订建议把「为什么对/错在哪」写清楚）：</div>
+      <textarea id="reExplain" rows="3" placeholder="留空 = 保持原解析">${esc("")}</textarea>
+      <div class="tiny dim" style="margin-top:6px">批注/icon 标记原因（审核人可见）：</div>
+      <input id="reNote" placeholder="例：第 B 项数值错误；题干没给条件…" style="width:100%">
+      <div class="cls-actions" style="margin-top:8px">
+        <button id="reSubmit" class="primary">${flagMode ? "🚩 提交标记" : "✅ 提交修订"}</button>
+        <button id="reCancel">取消</button>
+      </div>
+    </div>`;
+  $("reCancel").onclick = closeReview;
+  $("reSubmit").onclick = async () => {
+    const opts = [];
+    for (let i = 0; i < nOpts; i++) opts.push($(`reOpt${i}`).value);
+    const ansSel = document.querySelector("input[name=reAns]:checked");
+    const ans = ansSel && ansSel.value !== "keep" ? Number(ansSel.value) : null;
+    try {
+      const r = await post("/api/review/submit-edit", {
+        kp_id: q.kp_id, seed: q.seed, qhash: q.qhash,
+        prompt: $("rePrompt").value, options: opts,
+        answer_index: ans, explain: $("reExplain").value.trim() || null,
+        note: $("reNote").value, flag: flagMode,
+      });
+      $("revBody").innerHTML = `<div class="quiz-none ok" style="color:#1d7a46">${
+        r.status === "approved"
+          ? "✅ 修订已入精选题库：之后该知识点出题优先用修订版。"
+          : "⏳ 已提交，进入待审队列——教师会在审题台的「⏳ 待审」里放行。"}</div>`;
+      refreshReviewStats();
+    } catch (e) { showError(e.message); }
+  };
+}
+
+/* 教师放行/驳回学生的修订 */
+async function revListPending() {
+  const body = $("revBody");
+  let r;
+  try { r = await api("/api/review/pending"); }
+  catch (e) { showError(e.message); return; }
+  const items = r.items.map(it => `
+    <div class="cls-row">
+      <div>
+        <b class="tiny">${esc(it.reviewer || "")}</b>
+        <span class="tiny dim">${new Date((it.ts || 0) * 1000).toLocaleString()}</span>
+        <div class="tiny">${esc((it.prompt || "").slice(0, 80))}…</div>
+        ${it.note ? `<div class="tiny dim">批注：${esc(it.note)}</div>` : ""}
+      </div>
+      <div>
+        <button data-ok="${esc(it.qhash)}" class="primary">放行</button>
+        <button data-no="${esc(it.qhash)}">驳回</button>
+      </div>
+    </div>`).join("") || `<div class="tiny dim">没有待审的修订。</div>`;
+  body.innerHTML = `<div class="tiny">⏳ 待审（学生提交，放行后进精选题库）</div>${items}`;
+  body.querySelectorAll("[data-ok]").forEach(b => {
+    b.onclick = async () => {
+      try {
+        await post("/api/review/decide-edit", { qhash: b.dataset.ok, approve: true });
+        await revListPending();
+      } catch (e) { showError(e.message); }
+    };
+  });
+  body.querySelectorAll("[data-no]").forEach(b => {
+    b.onclick = async () => {
+      try {
+        await post("/api/review/decide-edit", { qhash: b.dataset.no, approve: false });
+        await revListPending();
+      } catch (e) { showError(e.message); }
+    };
+  });
 }
 
 /* 弹窗开合的公共小工具：body 滚动锁 + Backdrop 点击关闭 */
@@ -700,6 +795,7 @@ async function init() {
   });
   $("revDraw").onclick = revDraw;
   $("revList").onclick = revListCurated;
+  $("revPending").onclick = revListPending;
 
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
@@ -1252,7 +1348,16 @@ function renderQuiz() {
             <span class="qletter">${letters[i]}</span>${esc(o)}
           </button>`).join("")}
       </div>
+      ${(state.user && !state.user.is_guest) ? `
+      <div class="q-actions">
+        <a id="qaEdit" title="修订题干/选项/解析后提交题库">✏️ 修改本题</a>
+        <a id="qaFlag" title="题面/答案/超纲有问题？标记给教师">🚩 标记问题</a>
+      </div>` : ""}
     </div>`;
+  const qaEdit = slot.querySelector("#qaEdit");
+  const qaFlag = slot.querySelector("#qaFlag");
+  if (qaEdit) qaEdit.onclick = () => openRevEdit(q, false);
+  if (qaFlag) qaFlag.onclick = () => openRevEdit(q, true);
   slot.querySelectorAll(".qopt").forEach(b => {
     b.onclick = () => submitAnswer(Number(b.dataset.choice));
   });

@@ -106,7 +106,9 @@ button.primary:hover { background: var(--accent); color: #fff; }
 /* KaTeX 公式排版:默认 1.21em 会让公式比正文大出一截,统一成 1em;
    超长公式允许横向滚动,不撑破按钮/段落布局 */
 .katex { font-size: 1em; }
-.quiz-prompt, .qopt, .qr-explain { overflow-x: auto; overflow-y: hidden; }
+/* 不再给题干/选项/解析设 overflow 裁切:分式、上标会高出普通文字,
+   overflow-y:hidden 会把它们垂直裁掉,看起来公式重叠/错乱 */
+.quiz-prompt, .qopt, .qr-explain { overflow-wrap: anywhere; }
 .katex-error { color: inherit; font-family: ui-monospace, monospace; font-size: .92em; }
 
 .quiz-none { font-size: 12.5px; color: #b9770e; background: #fff8e8;
@@ -312,6 +314,19 @@ button.subtle:hover { border-color: #b9c2cc; color: #6b7480; }
 .rev-explain { margin: 8px 0 0; font-size: 13px; line-height: 1.55; color: #3a4550; }
 .src-badge.cur { background: #eef8f0; color: #1d7a46; border-color: #bfe3cb; }
 .rev-list-curated .cls-row button { font-size: 12px; }
+
+/* 人工修订编辑器（师生共建） */
+.q-actions { margin-top: 8px; border-top: 1px dashed #e3e8ee; padding-top: 6px;
+  display: flex; gap: 12px; }
+.q-actions a { font-size: 11.5px; color: var(--muted); cursor: pointer; text-decoration: none; }
+.q-actions a:hover { color: #21618c; text-decoration: underline; }
+.rev-card textarea, .rev-card input { font: inherit; font-size: 13px; width: 100%;
+  border: 1px solid #dbe2ea; border-radius: 6px; padding: 6px 8px; margin-top: 3px; }
+.re-opt { display: flex; gap: 8px; align-items: flex-start; margin-top: 4px; }
+.re-opt label { font-weight: 700; color: var(--muted); padding-top: 8px; white-space: nowrap; }
+.re-opt textarea { flex: 1; }
+.re-keep { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+.re-keep input, .re-opt input[type=radio] { width: auto; margin: 0; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .auth-tabs button { flex: 1; padding: 6px 0; }
 .auth-tabs button.on { background: #eaf3fa; border-color: var(--accent); color: var(--accent); font-weight: 700; }

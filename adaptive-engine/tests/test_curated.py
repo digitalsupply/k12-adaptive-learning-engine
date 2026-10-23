@@ -36,7 +36,7 @@ def test_upsert_and_get_roundtrip(store):
     # 同题再审（驳回）→ 覆盖状态,不炸主键
     store.upsert(q, "rejected", reviewer="王老师", note="选项含糊")
     assert store.get(q.qhash)["status"] == "rejected"
-    assert store.counts() == {"approved": 0, "rejected": 1}
+    assert store.counts() == {"approved": 0, "pending": 0, "rejected": 1}
     # 非法状态拒绝
     with pytest.raises(ValueError):
         store.upsert(q, "maybe", reviewer="x")
@@ -71,9 +71,26 @@ def test_unapprove_keeps_record(store):
 def test_counts_scoped_by_kp(store):
     store.upsert(_q(kp_id="a"), "approved", "t")
     store.upsert(_q(kp_id="b", seed=3), "rejected", "t")
-    assert store.counts("a") == {"approved": 1, "rejected": 0}
-    assert store.counts("b") == {"approved": 0, "rejected": 1}
-    assert store.counts() == {"approved": 1, "rejected": 1}
+    assert store.counts("a") == {"approved": 1, "pending": 0, "rejected": 0}
+    assert store.counts("b") == {"approved": 0, "pending": 0, "rejected": 1}
+    assert store.counts() == {"approved": 1, "pending": 0, "rejected": 1}
+
+
+def test_pending_edits_do_not_serve_until_teacher_approves(store):
+    """学生提交的修订进 pending：不参与复用，教师放行后才入库。"""
+    q = _q()
+    store.upsert(q, "pending", "小满同学", note="第 2 项数值算错")
+    assert store.serve_at("kp-x", 5) is None                    # 不复用待审题
+    assert store.counts("kp-x")["pending"] == 1
+    # 教师放行:按 qhash 取回存的题(raw payload),状态翻成 approved
+    stored = store.to_question(q.qhash)
+    assert stored.prompt == q.prompt                            # 原 seed 原文
+    store.upsert(stored, "approved", "王老师", note="已核对")
+    served = store.serve_at("kp-x", 5)
+    assert served.prompt == q.prompt and served.seed == 5
+    # pending → rejected(未放行先驳回) 与 approved 的被驳回都允许
+    store.upsert(q, "rejected", "王老师")
+    assert store.serve_at("kp-x", 5) is None
 
 
 def test_recent_carries_payload(store):
