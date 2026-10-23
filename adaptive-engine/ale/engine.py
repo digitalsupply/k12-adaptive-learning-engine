@@ -13,6 +13,7 @@ from . import planner as _planner
 from . import quiz as _quiz
 from . import review as _review
 from .config import Config, DEFAULT
+from .curated import CuratedStore
 from .dataset import Dataset
 from .graph import KnowledgeGraph
 from .llm import LLMClient, LLMConfig
@@ -113,6 +114,7 @@ class AdaptiveEngine:
         self.dataset = Dataset(self.config)
         self.store = _make_store(self.config)
         self._qbank = _AnswerBank(self.config.db_path.parent / "question_bank.jsonl")
+        self.curated = CuratedStore(self.config.db_path)
         self.llm = LLMClient(LLMConfig.from_env())
         self._graphs: dict[tuple[str, str], KnowledgeGraph] = {}
 
@@ -249,7 +251,7 @@ class AdaptiveEngine:
                       prefer: str | None = None,
                       for_answer: bool = False,
                       force_template: bool = False) -> _quiz.Question:
-        """出题：缓存 → LLM 命题 → 标注模板，三级回退。
+        """出题：缓存 → 精选题库 → LLM 命题 → 标注模板，四级回退。
 
         同 (kp_id, seed) 的题目永远相同（缓存保证），作答校验才能成立。
         for_answer=True 是作答校验模式：绝不调 LLM（重建必须是当初下发的那
@@ -259,16 +261,41 @@ class AdaptiveEngine:
         """
         kp = self.dataset.get_kp(kp_id)
         llm = None if force_template or prefer else self.llm
-        q = _quiz.generate_cached(
-            kp, seed=seed, cache_dir=self.config.quiz_cache_dir, llm=llm,
-            min_assessability=self.config.quiz_min_assessability,
-            rebuild=for_answer or force_template)
         if prefer:                  # 强制题型（测试用）
-            q = _quiz.generate(kp, seed=seed, prefer=prefer,
-                               min_assessability=self.config.quiz_min_assessability)
+            return _quiz.generate(kp, seed=seed, prefer=prefer,
+                                  min_assessability=self.config.quiz_min_assessability)
+        if for_answer or force_template:
+            q = _quiz.generate_cached(
+                kp, seed=seed, cache_dir=self.config.quiz_cache_dir, llm=llm,
+                min_assessability=self.config.quiz_min_assessability,
+                rebuild=True)
+        else:
+            q = self._question_with_curated(kp, seed, llm)
         if q.source in ("llm", "llm-cache"):
             self._qbank.put(q)      # AI 题答案落库，判分兜底用
         return q
+
+    def _question_with_curated(self, kp, seed: int,
+                               llm) -> _quiz.Question:
+        """出题新模式：缓存 → 精选 → LLM → 模板。
+
+        精选命中时把该题按「当前 seed + 当前缓存键(模型)」写回缓存并落
+        答案库：qhash 绑定 seed,复用到新 seed 的题必须与当初判分重建
+        用的缓存同键，否则换发一次 Seed 引发的判分 409 会很难排查。
+        """
+        cache_dir = self.config.quiz_cache_dir
+        model = llm.config.model if llm else ""
+        cached = _quiz.read_cache(cache_dir, kp, seed, model)
+        if cached is not None:
+            return cached
+        curated = self.curated.serve_at(kp.id, seed)
+        if curated is not None:
+            _quiz.write_cache(cache_dir, kp, seed, model, curated)
+            self._qbank.put(curated)     # 新 seed 的 qhash 也进答案库
+            return curated
+        return _quiz.generate_cached(
+            kp, seed=seed, cache_dir=cache_dir, llm=llm,
+            min_assessability=self.config.quiz_min_assessability)
 
     def set_llm_config(self, config: LLMConfig) -> None:
         """运行时热切换 LLM 配置（前端「LLM 设置」保存后调用）。

@@ -10,6 +10,7 @@ adaptive-engine/
 │   ├── graph.py          先修 DAG：拓扑序、祖先回溯、分层、枢纽识别、环检测
 │   ├── mastery.py        MasteryModel 接口 + BKT / Elo 两个实现（可插拔）
 │   ├── llm.py            OpenAI 兼容 LLM 客户端（纯标准库；.env 三行配置 + 内置 Provider 表）
+│   ├── curated.py        精选题库：教师审定的题入库（qhash 主键）与优先复用
 │   ├── classroom.py      班级与作业：教师建班/邀请码、作业布置、全班成绩矩阵
 │   ├── quiz.py           出题：LLM 命题（带完整上下文的命题规范）→ 缓存 → 标注模板兜底
 │   ├── accounts.py       账号：PBKDF2 口令哈希 + HMAC 签名会话 Cookie（纯标准库）
@@ -28,8 +29,8 @@ adaptive-engine/
 ├── figures/              交互图形（离线构建的静态 HTML/SVG）
 │   ├── registry.json     图形注册表：知识点 UUID → 图形
 │   └── ohm-lab/          欧姆定律实验台（model / geom / live / build）
-├── tests/                130 个测试：合成图单测 + 真实数据集端到端 + LLM 出题链路
-│                         + 账号/存储 + 班级/作业 + LLM 设置 + 回归
+├── tests/                136 个测试：合成图单测 + 真实数据集端到端 + LLM 出题链路
+│                         + 账号/存储 + 班级/作业 + 精选题库 + LLM 设置 + 回归
 ├── .env.example          LLM 配置样例（复制为 .env 填 Key；.env 已 gitignore）
 ├── pyproject.toml        pytest 配置（pythonpath，任意目录可跑）
 └── data/                 运行时目录（app.db、secret.key、students/、quiz_cache/、cache/，均 gitignore）
@@ -108,10 +109,23 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 3. 正确项与课标一致、具体可判断；不出「以上都对/都不对」，选项互不包含；
 4. 解析要说清正确项为什么对、错误项踩了哪条误区。
 
-生成路径三级回退：**缓存 → LLM → 模板**。同一 `(kp_id, seed, model)` 的题落盘
+生成路径四级回退：**缓存 → 教审精选 → LLM → 模板**。同一 `(kp_id, seed, model)` 的题落盘
 `data/quiz_cache/`（原子写；换模型或改提示词自动换一批），标题答耗时从秒级降到 0。
-LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度），不合格直接走兜底，
-不会把坏题发给学生。
+教师审定通过的题进入**精选题库**：该知识点之后出题优先复用精选题（实测 0.01s，
+零 LLM 开销），AI 只用来补充新角度。LLM 输出强校验（4 选项唯一、`answer_index` 合法、
+解析长度），不合格直接走兜底，不会把坏题发给学生。
+
+### 审题台：AI 题的质检闸门
+
+AI 出题规模上来之后，质量不敢全交给模型。教师（班级创建者）从右上角「✅ 审题台」
+进入：搜索知识点 → **抽题预览**（走正常出题链但带答案下发，不记掌握度、不是练习）
+→ 「通过」入精选题库 / 「驳回」。服务端按 `(kp_id, seed)` 只读缓存重建并核对 qhash
+——教师审定的和入库的必然是同一道题；非教师 403，游客不可用。
+
+精选题落到 `data/app.db` 的 `curated_questions`（含答案字段，仅教师端点可见），
+入库同时在 `question_bank.jsonl` 补判分记录；出题时若精选命中，还会把该题写回当前
+seed 的缓存——**判分重建 (qhash) 依然严格一致**，不会因为复用把学生 409。
+下发题面带「✅ 教师精选」徽标；精选可以下架（保留审定记录）。
 
 **防串题**：响应带选项哈希 `qhash`，作答时随答案带回；服务端按 `(kp_id, seed)`
 在读缓存里重建同一道题并核对哈希——缓存被清或换了模型会立即以 **409** 提示
@@ -226,6 +240,10 @@ LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度）�
 | GET | `/api/classes/{cid}/assignments/{aid}` | 作业详情：固定 (kp, seed) 题目条目 + 我的状态 |
 | POST | `/api/classes/{cid}/assignments/{aid}/answer` | 作业作答 `{item, choice, qhash}`：判分同普通答题 + 记进度（哈希不符 409） |
 | GET | `/api/classes/{cid}/assignments/{aid}/results` | 全班成绩矩阵（教师） |
+| POST | `/api/review/preview` | 审题台抽题预览：走出题链，带答案，不记掌握度（教师；非教师 403） |
+| POST | `/api/review/decide` | 审定：只读缓存重建核对 qhash 后，通过→入精选题库 / 驳回（qhash 不符 409） |
+| GET | `/api/review/curated` | 精选题库浏览（教师端点，含答案与解析；`?kp_id=` 过滤） |
+| POST | `/api/review/unapprove` | 下架精选题：不再参与出题复用（保留审定记录） |
 | GET | `/api/llm` | 当前 LLM 配置摘要（密钥只有末 4 位）+ Provider 预设 |
 | POST | `/api/llm/save` | 保存 LLM 配置：热切换 + 写回 `.env`（`{base_url, api_key, model, max_tokens}`；游客 403） |
 | POST | `/api/llm/test` | 连通性探测（不改配置不落盘；游客 403） |

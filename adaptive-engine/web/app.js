@@ -75,9 +75,10 @@ function renderAuthBar() {
     who.title = state.user.is_guest ? "注册后数据可长期保存" : "";
     loginBtn.classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
-    // LLM 设置是全局配置：注册用户可见，游客隐藏
+    // LLM 设置与班级/审题台是长期数据：注册用户可见，游客隐藏
     llmBtn.classList.toggle("hidden", !!state.user.is_guest);
     $("classBtn").classList.toggle("hidden", !!state.user.is_guest);
+    $("reviewBtn").classList.toggle("hidden", !!state.user.is_guest);
   } else {
     who.classList.add("hidden");
     loginBtn.classList.remove("hidden");
@@ -236,13 +237,144 @@ async function openClass() { closeLlm(); await renderClassList(); openBox($("cla
 
 function closeClass() { closeBox($("classModal")); }
 
+/* ---------------- 审题台：抽题预览 → 通过/驳回 → 精选题库 ---------------- */
+
+let revCtx = { kp: null, kpName: "", preview: null, searchTimer: null };
+
+function openReview() {
+  closeLlm();
+  document.body.classList.add("modal-open");
+  $("reviewModal").classList.remove("hidden");
+  refreshReviewStats();
+}
+
+function closeReview() { closeBox($("reviewModal")); }
+
+async function refreshReviewStats() {
+  $("revKpCur").textContent = revCtx.kp
+    ? `当前审题对象：${revCtx.kpName}`
+    : (state.selectedName ? `未选择——可用当前选中的知识点：${state.selectedName}` : "先搜索，或先在知识图里选中一个知识点");
+  $("revDraw").disabled = !(revCtx.kp || state.selected);
+  $("revList").disabled = !revCtx.kp;
+  try {
+    const r = await api("/api/review/curated?limit=1");
+    $("reviewStats").textContent =
+      `精选题库：通过 ${r.counts.approved} · 驳回 ${r.counts.rejected}`;
+  } catch (_) {
+    $("reviewStats").textContent = "";     // 非教师（403）等场景静默
+  }
+}
+
+async function revSearch(q) {
+  const list = $("revKpList");
+  if (!q || q.length < 2) { list.classList.add("hidden"); return; }
+  try {
+    const hits = await api(`/api/search?q=${encodeURIComponent(q)}&limit=8`);
+    if (!Array.isArray(hits) || !hits.length) { list.classList.add("hidden"); return; }
+    list.innerHTML = hits.map(k => `
+      <div class="rev-item" data-kp="${esc(k.kp_id)}" data-name="${esc(k.name)}">
+        ${esc(k.name)}<span class="tiny dim"> ${esc(k.subject || "")}</span></div>`).join("");
+    list.classList.remove("hidden");
+    list.querySelectorAll(".rev-item").forEach(el => {
+      el.onclick = () => {
+        revCtx.kp = el.dataset.kp; revCtx.kpName = el.dataset.name;
+        $("revKpQ").value = el.dataset.name;
+        list.classList.add("hidden");
+        refreshReviewStats();
+        $("revDraw").disabled = false;
+      };
+    });
+  } catch (e) { showError(e.message); }
+}
+
+async function revDraw() {
+  const kpId = revCtx.kp || state.selected;
+  if (!kpId) return;
+  const btn = $("revDraw");
+  btn.disabled = true;
+  $("revBody").innerHTML = `<div class="tiny dim" id="revWaiting">正在抽题预览（AI 命题约需 10~40 秒）…</div>`;
+  try {
+    const q = await post("/api/review/preview", { kp_id: kpId });
+    revCtx.preview = q;
+    renderRevCard(q);
+  } catch (e) {
+    revCtx.preview = null;
+    $("revBody").innerHTML = `<div class="quiz-none">⚠ ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderRevCard(q) {
+  const letters = "ABCDEFGH";
+  const src = q.source === "curated" ? "✅ 精选复用" : ((q.source === "llm" || q.source === "llm-cache") ? `🤖 AI 命题（${esc(q.model || "")}）` : "📝 模板兜底");
+  $("revBody").innerHTML = `
+    <div class="rev-card">
+      <div class="tiny dim">${esc(q.kp_name)} · seed ${q.seed} · ${src} · 精选库 ${q.curated_counts.approved} 道</div>
+      <div class="quiz-prompt">${esc(q.prompt)}</div>
+      <div class="rev-opts">
+        ${q.options.map((o, i) => `
+          <div class="rev-opt ${i === q.answer_index ? "ok" : ""}">
+            <span class="qletter">${letters[i]}</span>${esc(o)}
+            ${i === q.answer_index ? `<b style="margin-left:auto">✓ 正确</b>` : ""}
+          </div>`).join("")}
+      </div>
+      <div class="rev-explain"><b>解析：</b>${esc(q.explain || "")}</div>
+      ${q.misconception ? `<div class="rev-explain tiny">针对误区：${esc(q.misconception)}</div>` : ""}
+      <div class="cls-actions">
+        <button id="revOk" class="primary">✅ 通过，入精选题库</button>
+        <button id="revNo">✕ 驳回</button>
+        <input id="revNote" placeholder="批注（可选）" style="flex:1 1 140px">
+      </div>
+    </div>`;
+  const body = $("revBody");
+  body.querySelector("#revOk").onclick = () => revDecide(q, true);
+  body.querySelector("#revNo").onclick = () => revDecide(q, false);
+  renderMath(body);
+}
+
+async function revDecide(q, approve) {
+  const note = $("revNote") ? $("revNote").value : "";
+  try {
+    const r = await post("/api/review/decide",
+      { kp_id: q.kp_id, seed: q.seed, qhash: q.qhash, approve, note });
+    $("revBody").innerHTML = `<div class="quiz-none ${approve ? "ok" : "dim"}">${
+      approve ? "✅ 已入库：该知识点之后出题将优先复用这道精选题。" : "✕ 已驳回，学生不会看到这道题。"
+    }</div>`;
+    refreshReviewStats();
+  } catch (e) { showError(e.message); }
+}
+
+async function revListCurated() {
+  const kpId = revCtx.kp;
+  if (!kpId) { showError("先搜索选择一个知识点"); return; }
+  try {
+    const r = await api(`/api/review/curated?kp_id=${encodeURIComponent(kpId)}`);
+    const items = r.items.map(it => `
+      <div class="cls-row">
+        <div><span class="tiny dim">${new Date((it.ts || 0) * 1000).toLocaleString()} · ${esc(it.reviewer || "")}</span>
+          ${esc((it.prompt || "").slice(0, 60))}…</div>
+        <button data-down="${esc(it.qhash)}">下架</button>
+      </div>`).join("") || `<div class="tiny dim">该知识点还没有精选题。</div>`;
+    $("revBody").innerHTML = `<div class="rev-list-curated"><b class="tiny">精选题库 · ${esc(revCtx.kpName)}（${r.counts.approved}）</b>${items}</div>`;
+    $("revBody").querySelectorAll("[data-down]").forEach(b => {
+      b.onclick = async () => {
+        try {
+          await post("/api/review/unapprove", { qhash: b.dataset.down });
+          await revListCurated();
+        } catch (e) { showError(e.message); }
+      };
+    });
+  } catch (e) { showError(e.message); }
+}
+
 /* 弹窗开合的公共小工具：body 滚动锁 + Backdrop 点击关闭 */
 let knownKeydown = null;
 function openBox(modal) {
   modal.classList.remove("hidden");
   document.body.classList.add("modal-open");
   if (!knownKeydown) {
-    knownKeydown = (e) => { if (e.key === "Escape") { closeClass(); closeLlm(); closeAuth(); } };
+    knownKeydown = (e) => { if (e.key === "Escape") { closeReview(); closeClass(); closeLlm(); closeAuth(); } };
     document.addEventListener("keydown", knownKeydown);
   }
 }
@@ -250,7 +382,8 @@ function closeBox(modal) {
   modal.classList.add("hidden");
   if ($("authModal").classList.contains("hidden") &&
       $("llmModal").classList.contains("hidden") &&
-      $("classModal").classList.contains("hidden")) {
+      $("classModal").classList.contains("hidden") &&
+      $("reviewModal").classList.contains("hidden")) {
     document.body.classList.remove("modal-open");
   }
 }
@@ -554,6 +687,19 @@ async function init() {
   $("classModal").addEventListener("click", (e) => {
     if (e.target === $("classModal")) closeClass();
   });
+
+  /* ---- 审题台绑定 ---- */
+  $("reviewBtn").onclick = openReview;
+  $("reviewClose").onclick = closeReview;
+  $("reviewModal").addEventListener("click", (e) => {
+    if (e.target === $("reviewModal")) closeReview();
+  });
+  $("revKpQ").addEventListener("input", (e) => {
+    clearTimeout(revCtx.searchTimer);
+    revCtx.searchTimer = setTimeout(() => revSearch(e.target.value.trim()), 250);
+  });
+  $("revDraw").onclick = revDraw;
+  $("revList").onclick = revListCurated;
 
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
@@ -1091,7 +1237,9 @@ function renderQuiz() {
   if (!q) { slot.innerHTML = ""; return; }
   const letters = "ABCDEFGH";
   const isLLM = q.source === "llm" || q.source === "llm-cache";
-  const badge = isLLM
+  const badge = q.source === "curated"
+    ? `<span class="src-badge cur" title="教师审定的精选题（出题优先复用）">✅ 教师精选</span>`
+    : isLLM
     ? `<span class="src-badge ai" title="由 ${esc(q.model || "AI")} 生成，仅此题可用">🤖 AI 命题</span>`
     : `<span class="src-badge tpl" title="由知识点标注生成（未配置 LLM 时的兜底）">📝 模板示例</span>`;
   slot.innerHTML = `

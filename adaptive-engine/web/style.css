@@ -296,6 +296,22 @@ button.subtle:hover { border-color: #b9c2cc; color: #6b7480; }
 .matrix td.ok { background: #f0faf2; } .matrix td.bad { background: #fdf2f1; }
 .matrix .sum td { background: #f8fafc; color: #59636e; }
 .qr-hw { margin-top: 6px; color: #1c5d8f; font-weight: 600; font-size: 12px; }
+
+/* 审题台 */
+.review-box { width: min(560px, 94vw); max-height: 86vh; overflow-y: auto; }
+.review-box h3 { margin: 0; }
+.rev-list { border: 1px solid #e3e8ee; border-radius: 8px; margin-top: 4px; max-height: 180px; overflow-y: auto; }
+.rev-item { padding: 6px 10px; cursor: pointer; font-size: 13.5px; border-bottom: 1px solid #f0f3f7; }
+.rev-item:last-child { border-bottom: 0; }
+.rev-item:hover { background: #f4f8fb; }
+.rev-card { border: 1px solid #dfe8f0; border-radius: 10px; padding: 10px 12px; margin-top: 8px; }
+.rev-opts { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.rev-opt { display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+  border: 1px solid #e3e8ee; border-radius: 6px; font-size: 13.5px; }
+.rev-opt.ok { border-color: #bfe3cb; background: #f0faf2; }
+.rev-explain { margin: 8px 0 0; font-size: 13px; line-height: 1.55; color: #3a4550; }
+.src-badge.cur { background: #eef8f0; color: #1d7a46; border-color: #bfe3cb; }
+.rev-list-curated .cls-row button { font-size: 12px; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .auth-tabs button { flex: 1; padding: 6px 0; }
 .auth-tabs button.on { background: #eaf3fa; border-color: var(--accent); color: var(--accent); font-weight: 700; }

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from typing import Any
 
@@ -19,6 +20,7 @@ from ale.accounts import SESSION_COOKIE, Accounts
 from ale.classroom import Classroom
 from ale.config import FIGURES_DIR, WEB_DIR
 from ale.engine import AdaptiveEngine, QHashMismatch
+from ale.quiz import NoQuestionError as QNoQuestion
 from ale.figures import FigureRegistry
 from ale.llm import (KNOWN_PROVIDERS, LLMClient, LLMConfig, LLMError,
                      load_dotenv, probe_chat, save_llm_config)
@@ -87,6 +89,24 @@ class HomeworkAnswerIn(BaseModel):
     item: int = Field(..., ge=0)
     choice: int = Field(..., ge=0, le=9)
     qhash: str | None = None
+
+
+class ReviewPreviewIn(BaseModel):
+    """抽题预览：seed 不传 = 服务端随机抽（审题台不是练习，不记掌握度）。"""
+    kp_id: str
+    seed: int | None = Field(default=None, ge=0, lt=1_000_000)
+
+
+class ReviewDecideIn(BaseModel):
+    kp_id: str
+    seed: int = Field(..., ge=0, lt=1_000_000)
+    qhash: str
+    approve: bool
+    note: str = ""
+
+
+class ReviewUnapproveIn(BaseModel):
+    qhash: str
 
 
 class DiagnoseIn(BaseModel):
@@ -549,6 +569,86 @@ def assignment_results(cid: str, aid: str,
         return d
     except Exception as e:
         raise _classroom_error(e)
+
+
+# ---------------- 审题台：AI 题审定入精选题库 ----------------
+
+def _require_reviewer(user: dict) -> None:
+    """审题台面向教师：以「创建过班级」为教师身份的判定依据。
+
+    精选题库是全局公共资源，学生（或游客）如果也能往里放题，
+    质量闸门就形同虚设。
+    """
+    _registered_user(user)
+    if not classroom.owned_classes(user["id"]):
+        raise HTTPException(403, "审题台面向教师：请先在「🏫 班级」面板新建一个班级")
+
+
+@app.post("/api/review/preview")
+def review_preview(body: ReviewPreviewIn,
+                   user: dict = Depends(require_user)) -> dict[str, Any]:
+    """抽题预览：走正常出题链（缓存 → 精选 → LLM → 模板），带答案下发，
+    但不写掌握度不记作答——审题不是练习。
+    """
+    _require_reviewer(user)
+    try:
+        eng.dataset.get_kp(body.kp_id)
+    except KeyError:
+        raise HTTPException(404, f"知识点不存在：{body.kp_id}")
+    seed = body.seed if body.seed is not None else random.randrange(1_000_000)
+    try:
+        q = eng.make_question(body.kp_id, seed=seed)
+    except QNoQuestion as e:
+        raise HTTPException(422, str(e))
+    out = q.to_dict(reveal=True)
+    out["model"] = q.model
+    out["curated_counts"] = eng.curated.counts(body.kp_id)
+    return out
+
+
+@app.post("/api/review/decide")
+def review_decide(body: ReviewDecideIn,
+                  user: dict = Depends(require_user)) -> dict[str, Any]:
+    """审定：服务端按 (kp_id, seed) 只读缓存重建，核对 qhash 一致后才
+    接受决定——教师审的和入库的必须是同一道题。
+    """
+    _require_reviewer(user)
+    try:
+        q = eng.make_question(body.kp_id, seed=body.seed, for_answer=True)
+    except QNoQuestion as e:
+        raise HTTPException(422, f"无法重建该题：{e}")
+    if q.qhash != body.qhash:
+        raise HTTPException(409, "预览的题目已刷新（缓存变动），请重新抽题再决定")
+    status = "approved" if body.approve else "rejected"
+    row = eng.curated.upsert(q, status, reviewer=user.get("username") or "",
+                             note=body.note[:200])
+    if body.approve:
+        eng._qbank.put(q)        # 精选题也进答案库，换模型/清缓存仍能判分
+    return {**row, "counts": eng.curated.counts(body.kp_id)}
+
+
+@app.get("/api/review/curated")
+def review_curated(kp_id: str | None = None, limit: int = 30,
+                   user: dict = Depends(require_user)) -> dict[str, Any]:
+    """精选题库浏览（教师端点，含答案与解析）。"""
+    _require_reviewer(user)
+    limit = max(1, min(100, limit))
+    return {"items": eng.curated.recent(status="approved", kp_id=kp_id,
+                                        limit=limit),
+            "counts": eng.curated.counts(kp_id)}
+
+
+@app.post("/api/review/unapprove")
+def review_unapprove(body: ReviewUnapproveIn,
+                     user: dict = Depends(require_user)) -> dict[str, Any]:
+    """下架：精选题不再参与出题复用。"""
+    _require_reviewer(user)
+    row = eng.curated.unapprove(body.qhash, reviewer=user.get("username") or "")
+    if row is None:
+        raise HTTPException(404, "未找到该精选题（可能已下架）")
+    return {"qhash": row["qhash"], "status": row["status"],
+            "counts": eng.curated.counts(row["kp_id"])}
+
 
 # ---------------- LLM 出题设置（前端可视化配置） ----------------
 

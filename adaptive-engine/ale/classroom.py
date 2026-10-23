@@ -150,6 +150,12 @@ class Classroom:
                 (uid,)).fetchall()]
         return [self.class_summary(cid, uid) for cid in ids]
 
+    def owned_classes(self, uid: str) -> list[str]:
+        """uid 以教师身份创建的班级 id 列表（审题台等教师功能的门禁依据）。"""
+        with self._conn() as con:
+            return [r[0] for r in con.execute(
+                "SELECT id FROM classes WHERE owner_uid=?", (uid,)).fetchall()]
+
     def members(self, cid: str, uid: str) -> list[dict]:
         """成员列表（全员可见；含用户名与各自档案 id）。"""
         if self._membership(cid, uid) is None:

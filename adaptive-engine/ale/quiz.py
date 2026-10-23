@@ -276,7 +276,14 @@ def _cache_path(cache_dir: Path, kp: KnowledgePoint, seed: int,
 
 def _cache_get(cache_dir: Path, kp: KnowledgePoint, seed: int,
                llm: LLMClient | None) -> Question | None:
-    p = _cache_path(cache_dir, kp, seed, llm.config.model if llm else "")
+    return read_cache(cache_dir, kp, seed,
+                      llm.config.model if llm else "")
+
+
+def read_cache(cache_dir: Path, kp: KnowledgePoint, seed: int,
+               model: str = "", version: str = PROMPT_VERSION) -> Question | None:
+    """按显式模型键读缓存（供引擎的精选复用链使用）。"""
+    p = _cache_path(cache_dir, kp, seed, model, version)
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -297,8 +304,15 @@ def _cache_get(cache_dir: Path, kp: KnowledgePoint, seed: int,
 def _cache_put(cache_dir: Path, kp: KnowledgePoint, seed: int,
                llm: LLMClient, q: Question) -> None:
     """原子写入，避免中途崩溃留下半截 JSON。"""
+    write_cache(cache_dir, kp, seed, llm.config.model if llm else "", q)
+
+
+def write_cache(cache_dir: Path, kp: KnowledgePoint, seed: int,
+                model: str, q: Question,
+                version: str = PROMPT_VERSION) -> None:
+    """按显式模型键原子写缓存（供引擎把精选题注入判分重建链使用）。"""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = _cache_path(cache_dir, kp, seed, llm.config.model)
+    target = _cache_path(cache_dir, kp, seed, model, version)
     payload = {
         "kp_id": q.kp_id, "kp_name": q.kp_name, "seed": q.seed,
         "kind": q.kind, "prompt": q.prompt, "options": q.options,
