@@ -255,12 +255,20 @@ button.wide { width: 100%; margin-top: 8px; }
 
 /* ---------------- 认证（登录条 + 弹窗） ---------------- */
 
-.auth-modal { position: fixed; inset: 0; background: rgba(15,30,50,.42);
-  display: flex; align-items: center; justify-content: center; z-index: 60; }
+.auth-modal { position: fixed; inset: 0; background: rgba(15,30,50,.42);  display: flex; align-items: center; justify-content: center; z-index: 60; }
 .auth-modal.hidden { display: none; }
 .auth-box { width: min(360px, 92vw); background: #fff; border-radius: 12px;
   box-shadow: 0 24px 80px rgba(15,30,50,.32); padding: 20px 22px 18px; position: relative; }
 .auth-box h3 { margin: 2px 0 10px; font-size: 16px; }
+
+/* LLM 设置面板：比认证框宽一些 */
+.llm-box { width: min(430px, 94vw); }
+.llm-status { font-size: 12.5px; background: #f6f8fa; border: 1px solid #e3e8ee;
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 10px; }
+.llm-status .ok { color: #1d7a46; font-weight: 700; }
+.llm-status .dim { color: #8a94a0; }
+button.subtle { background: #fff; color: #8a94a0; border-color: #dbe2ea; font-size: 12px; }
+button.subtle:hover { border-color: #b9c2cc; color: #6b7480; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .auth-tabs button { flex: 1; padding: 6px 0; }
 .auth-tabs button.on { background: #eaf3fa; border-color: var(--accent); color: var(--accent); font-weight: 700; }

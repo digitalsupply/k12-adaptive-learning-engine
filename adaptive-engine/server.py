@@ -19,7 +19,8 @@ from ale.accounts import SESSION_COOKIE, Accounts
 from ale.config import FIGURES_DIR, WEB_DIR
 from ale.engine import AdaptiveEngine, QHashMismatch
 from ale.figures import FigureRegistry
-from ale.llm import load_dotenv
+from ale.llm import (KNOWN_PROVIDERS, LLMClient, LLMConfig, LLMError,
+                     load_dotenv, probe_chat, save_llm_config)
 
 load_dotenv()          # 项目根 .env（LLM 配置等），不覆盖进程已有环境变量
 
@@ -55,6 +56,18 @@ class AnswerIn(BaseModel):
     qhash: str | None = None
 
 
+class LLMSettingsIn(BaseModel):
+    """LLM 出题配置（前端「LLM 设置」面板的保存/探测请求体）。
+
+    api_key 留空 = 保持现有 key 不变；base_url/model 全空 = 停用 AI 出题。
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    max_tokens: int | None = Field(default=None, ge=64, le=65536)
+
+
 class DiagnoseIn(BaseModel):
     kp_ids: list[str] = Field(..., min_length=1)
 
@@ -80,6 +93,7 @@ class SimulateIn(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
 
 
 @app.get("/api/config")
@@ -372,6 +386,88 @@ def _writable_student(sid: str, user: dict):
     if stu.owner_id != user["id"]:
         raise HTTPException(404, "学生不存在")
     return stu
+
+# ---------------- LLM 出题设置（前端可视化配置） ----------------
+
+def _require_registered(user: dict) -> None:
+    """改 LLM 配置是全局操作，游客一律拒绝。"""
+    if user.get("is_guest"):
+        raise HTTPException(403, "游客模式不能修改 LLM 设置，请先注册")
+
+
+def _llm_settings_out(cfg: LLMConfig) -> dict[str, Any]:
+    """配置摘要。密钥永不回传，只给「是否已配置 + 末 4 位」。"""
+    return {
+        "enabled": cfg.enabled,
+        "base_url": cfg.base_url,
+        "model": cfg.model,
+        "key_set": bool(cfg.api_key),
+        "key_hint": cfg.api_key[-4:] if cfg.api_key else "",
+        "max_tokens": cfg.max_tokens,
+        "providers": [{"key": k, "base_url": v["base_url"], "model": v["model"]}
+                      for k, v in KNOWN_PROVIDERS.items()],
+    }
+
+
+@app.get("/api/llm")
+def llm_read(user: dict = Depends(require_user)) -> dict[str, Any]:
+    """当前 LLM 配置（登录即可看；游客只能看不能改）。"""
+    return _llm_settings_out(eng.llm.config)
+
+
+@app.post("/api/llm/save")
+def llm_save(body: LLMSettingsIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    """保存 LLM 配置：热切换运行中的客户端 + 原子写回 .env（重启不变）。
+
+    api_key 留空 = 沿用现有 key（面板显示已配置时通常留空）；三项全空 = 停用。
+    """
+    _require_registered(user)
+    old = eng.llm.config
+    new = LLMConfig(
+        base_url=body.base_url.strip().rstrip("/"),
+        api_key=body.api_key.strip() or old.api_key,
+        model=body.model.strip(),
+        max_tokens=body.max_tokens or old.max_tokens,
+        # 会话 ID 保持进程级稳定；换服务商也无害（对方会忽略）
+        session_id=old.session_id,
+    )
+    if not new.enabled and (new.base_url or new.api_key or new.model):
+        raise HTTPException(
+            422, "配置不完整：base_url / api_key / model 需要三项齐备才会启用")
+    eng.set_llm_config(new)
+    try:
+        save_llm_config(new.base_url, new.api_key, new.model, new.max_tokens)
+    except OSError as e:
+        raise HTTPException(500, f"配置已生效但写盘失败：{e}")
+    return _llm_settings_out(eng.llm.config)
+
+
+@app.post("/api/llm/test")
+def llm_test(body: LLMSettingsIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    """连通性探测：用面板里填的值（key 留空则用现有 key）试发一条短消息。
+
+    探测不改配置、不落盘。返回 ok / 耗时 / 模型回复，或错误摘要。
+    """
+    _require_registered(user)
+    old = eng.llm.config
+    probe_cfg = LLMConfig(
+        base_url=body.base_url.strip().rstrip("/"),
+        api_key=body.api_key.strip() or old.api_key,
+        model=body.model.strip(),
+        max_tokens=body.max_tokens or 512,
+        session_id=old.session_id,
+        timeout=min(60.0, old.timeout if old.timeout > 60 else 60.0),
+    )
+    if not probe_cfg.enabled:
+        raise HTTPException(422, "三项配置不完整，无法探测")
+    t0 = time.time()
+    try:
+        reply = probe_chat(LLMClient(probe_cfg))
+    except LLMError as e:
+        return {"ok": False, "error": str(e), "latency_ms": round((time.time() - t0) * 1000)}
+    return {"ok": True, "reply": reply[:80],
+            "model": probe_cfg.model,
+            "latency_ms": round((time.time() - t0) * 1000)}
 
 
 @app.post("/api/auth/register")

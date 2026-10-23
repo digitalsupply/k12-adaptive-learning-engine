@@ -190,8 +190,7 @@ def cmd_llm_check(a):
         raise SystemExit(2)
     print(f"Provider：{cfg.base_url}  model={cfg.model}")
     try:
-        reply = client.chat("不要思考过程，直接说结论。回答格式：正常", "测试", temperature=0.0,
-                            max_tokens=512)
+        reply = llm.probe_chat(client)
         print(f"连通性：✓（回复：{reply[:20]}）")
     except llm.LLMError as e:
         print(f"连通性：✗  {e}")

@@ -20,15 +20,25 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-# 常见 Provider 的默认配置，供 CLI 提示与测试使用
+# 常见 Provider 的默认配置，供 CLI 提示与前端「LLM 设置」预设下拉使用
 KNOWN_PROVIDERS: dict[str, dict[str, str]] = {
+    "go": {"base_url": "https://opencode.ai/inference/go/openai/v1",
+           "model": "deepseek-v4.1-flash"},
     "deepseek": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
     "dashscope": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                   "model": "qwen-plus"},
     "zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash"},
     "opencode": {"base_url": "https://opencode.ai/inference/openai/v1",
                  "model": "qwen3.8-flash"},
+    "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b-instruct"},
 }
+
+
+def probe_chat(client: LLMClient, max_tokens: int = 512) -> str:
+    """连通性探针：让模型输出一个极短回复。
+    提示词带「不要思考过程」，避免推理模型把预算耗在思考上。"""
+    return client.chat("不要思考过程，直接说结论。回答格式：正常", "测试",
+                       temperature=0.0, max_tokens=max_tokens)
 
 
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -188,6 +198,48 @@ def _default_session_id() -> str:
     except OSError:
         pass
     return sid
+
+
+def save_llm_config(base_url: str = "", api_key: str = "", model: str = "",
+                    max_tokens: int | None = None,
+                    keep_session: bool = True) -> None:
+    """把 LLM 出题配置原子写回 .env，其余行原样保留（含注释掉的旧行也一并清掉）。
+
+    三项全空 = 停用 AI 出题（回到标注模板兜底）。写入即持久化，重启不变；
+    调用方负责随后刷新运行中的客户端（engine.set_llm_config）。
+    """
+    if _ENV_PATH.exists():
+        try:
+            lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+    else:
+        lines = []
+    # 删掉所有 K12_LLM_* 行（含注释形态），其余行原样保留
+    body = [ln for ln in lines
+            if not ln.lstrip("# \t").startswith("K12_LLM_")]
+    cfg = [("K12_LLM_BASE_URL", base_url.strip()),
+           ("K12_LLM_API_KEY", api_key.strip()),
+           ("K12_LLM_MODEL", model.strip())]
+    if max_tokens is not None:
+        cfg.append(("K12_LLM_MAX_TOKENS", str(int(max_tokens))))
+    if keep_session and os.path.exists(
+            Path(__file__).resolve().parent.parent / "data" / "llm_session_id"):
+        try:
+            sid = (Path(__file__).resolve().parent.parent / "data"
+                   / "llm_session_id").read_text(encoding="utf-8").strip()
+            if sid:
+                cfg.append(("K12_LLM_SESSION", sid))
+        except OSError:
+            pass
+    cfg = [(k, v) for k, v in cfg if v]
+    if cfg:
+        body = (["# ---- LLM 出题配置（前端「LLM 设置」面板会改写此段） ----"]
+                + [f"{k}={v}" for k, v in cfg] + body)
+    text = "\n".join(body).rstrip("\n") + "\n"
+    tmp = _ENV_PATH.with_name(".env.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, _ENV_PATH)
 
 
 def parse_json_block(text: str) -> dict:

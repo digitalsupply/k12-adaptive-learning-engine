@@ -65,7 +65,7 @@ async function refreshAuth() {
 }
 
 function renderAuthBar() {
-  const who = $("authWho"), loginBtn = $("loginBtn");
+  const who = $("authWho"), loginBtn = $("loginBtn"), llmBtn = $("llmBtn");
   if (state.user) {
     who.classList.remove("hidden");
     who.textContent = state.user.is_guest
@@ -74,10 +74,13 @@ function renderAuthBar() {
     who.title = state.user.is_guest ? "注册后数据可长期保存" : "";
     loginBtn.classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
+    // LLM 设置是全局配置：注册用户可见，游客隐藏
+    llmBtn.classList.toggle("hidden", !!state.user.is_guest);
   } else {
     who.classList.add("hidden");
     loginBtn.classList.remove("hidden");
     $("logoutBtn").classList.add("hidden");
+    llmBtn.classList.add("hidden");
   }
 }
 
@@ -125,6 +128,7 @@ async function authGuest() {
 }
 
 /* 登录/注册/游客成功后：刷新用户与学生列表，切到自己的档案 */
+/* 登录/注册/游客成功后：刷新用户与学生列表，切到自己的档案 */
 async function reloadSession() {
   renderAuthBar();
   const students = await api("/api/students");
@@ -137,6 +141,108 @@ async function reloadSession() {
   }
   state.selected = null;
   if (state.viewMode === "map") await loadGraph(); else await enterChainView();
+}
+
+/* ---------------- LLM 出题设置面板 ----------------
+   三级信息源：服务端下发预设(provider/base_url/model)→ 面板可直接套用；
+   key 永不回传(只显示末4位)；保存热生效并写回 .env，重启不变。 */
+
+const llmProviderLabels = {
+  go: "OpenCode Go", deepseek: "DeepSeek", dashscope: "通义百炼",
+  zhipu: "智谱", opencode: "OpenCode 标准", ollama: "Ollama 本地",
+};
+let llmProviders = [];
+
+function llmStatusLine(s) {
+  if (!s) return "";
+  return s.enabled
+    ? `<span class="ok">已启用</span> · 模型 <b>${esc(s.model)}</b>`
+    : `<span class="dim">未启用（当前走 📝 模板兜底）</span>`;
+}
+
+function renderLlmResult(text, ok) {
+  const box = $("llmResult");
+  box.classList.remove("hidden");
+  box.style.color = ok === undefined ? "inherit" : (ok ? "#1d7a46" : "#c0392b");
+  box.textContent = text;
+}
+
+async function openLlm() {
+  try {
+    const s = await api("/api/llm");
+    llmProviders = s.providers || [];
+    const sel = $("llmPreset");
+    sel.innerHTML = "";
+    sel.add(new Option("预设服务商（选一个自动填好下面两项）", ""));
+    llmProviders.forEach((p, i) =>
+      sel.add(new Option(`${llmProviderLabels[p.key] || p.key} · ${p.model}`, p.key), i));
+    $("llmBase").value = s.base_url;
+    $("llmModel").value = s.model;
+    $("llmMaxTokens").value = s.max_tokens || "";
+    $("llmKey").placeholder = s.key_set
+      ? `已配置（末4位 ${s.key_hint}）· 留空不修改`
+      : "sk-...";
+    $("llmKey").value = "";
+    $("llmStatus").innerHTML = llmStatusLine(s);
+    renderLlmResult("");
+    $("llmModal").classList.remove("hidden");
+  } catch (e) { showError(e.message); }
+}
+
+function closeLlm() { $("llmModal").classList.add("hidden"); }
+
+function llmPayload() {
+  const mt = parseInt($("llmMaxTokens").value, 10);
+  return {
+    base_url: $("llmBase").value.trim(),
+    model: $("llmModel").value.trim(),
+    api_key: $("llmKey").value.trim(),     // 留空 = 沿用现有 key
+    max_tokens: Number.isFinite(mt) && mt > 0 ? mt : undefined,
+  };
+}
+
+async function llmTest() {
+  const p = llmPayload();
+  if (!p.base_url || !p.model) { renderLlmResult("先填 接口地址 和 模型名", false); return; }
+  const btn = $("llmTest");
+  btn.disabled = true; btn.textContent = "测试中…";
+  renderLlmResult("测试中（免费/推理模型可能要十~几十秒）…");
+  try {
+    const r = await post("/api/llm/test", p);
+    if (r.ok) {
+      renderLlmResult(`✓ ${r.latency_ms}ms · ${r.model} 回复：「${r.reply}」`, true);
+    } else {
+      renderLlmResult(`✗ ${String(r.error).slice(0, 160)}`, false);
+    }
+  } catch (e) {
+    renderLlmResult(`✗ ${e.message}`, false);
+  } finally {
+    btn.disabled = false; btn.textContent = "测试连通性";
+  }
+}
+
+async function llmSave(disable = false) {
+  const btn = disable ? $("llmDisable") : $("llmSave");
+  if (!disable && (!$("llmBase").value.trim() || !$("llmModel").value.trim())) {
+    renderLlmResult("启用需要 接口地址 + API Key + 模型名 三项齐备", false); return;
+  }
+  btn.disabled = true;
+  try {
+    const body = disable ? { base_url: "", model: "", api_key: "" } : llmPayload();
+    const r = await post("/api/llm/save", body);
+    $("llmStatus").innerHTML = llmStatusLine(r);
+    $("llmKey").value = "";
+    $("llmKey").placeholder = r.key_set
+      ? `已配置（末4位 ${r.key_hint}）· 留空不修改`
+      : "sk-...";
+    renderLlmResult(disable
+      ? "已停用 AI 出题，恢复模板兜底；想再开启直接选预设+填模型即可。"
+      : "已保存并热生效，重启服务也保持。", true);
+  } catch (e) {
+    renderLlmResult(`✗ ${e.message}`, false);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function init() {
@@ -193,6 +299,20 @@ async function init() {
     await post("/api/auth/logout", {}).catch(() => {});
     location.reload();
   };
+
+  /* ---- LLM 设置面板绑定 ---- */
+  $("llmBtn").onclick = openLlm;
+  $("llmClose").onclick = closeLlm;
+  $("llmModal").addEventListener("click", (e) => {
+    if (e.target === $("llmModal")) closeLlm();
+  });
+  $("llmPreset").onchange = (e) => {
+    const p = llmProviders.find(p => p.key === e.target.value);
+    if (p) { $("llmBase").value = p.base_url; $("llmModel").value = p.model; }
+  };
+  $("llmTest").onclick = llmTest;
+  $("llmSave").onclick = () => llmSave();
+  $("llmDisable").onclick = () => llmSave(true);
 
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);

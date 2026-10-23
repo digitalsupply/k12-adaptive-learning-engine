@@ -270,6 +270,14 @@ class AdaptiveEngine:
             self._qbank.put(q)      # AI 题答案落库，判分兜底用
         return q
 
+    def set_llm_config(self, config: LLMConfig) -> None:
+        """运行时热切换 LLM 配置（前端「LLM 设置」保存后调用）。
+
+        缓存键含模型名 → 换模型自动隔离旧缓存，不影响判分一致性
+        （qhash 判分用的答案库与题目缓存都按各自键取，不互相污染）。
+        """
+        self.llm = LLMClient(config)
+
     def answer_question(self, sid: str, kp_id: str, seed: int, choice: int,
                         now: float | None = None,
                         qhash: str | None = None) -> dict[str, Any]:
