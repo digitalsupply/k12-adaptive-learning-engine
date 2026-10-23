@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ale.accounts import SESSION_COOKIE, Accounts
+from ale.classroom import Classroom
 from ale.config import FIGURES_DIR, WEB_DIR
 from ale.engine import AdaptiveEngine, QHashMismatch
 from ale.figures import FigureRegistry
@@ -66,6 +67,26 @@ class LLMSettingsIn(BaseModel):
     api_key: str = ""
     model: str = ""
     max_tokens: int | None = Field(default=None, ge=64, le=65536)
+
+
+class ClassIn(BaseModel):
+    name: str
+
+
+class JoinIn(BaseModel):
+    code: str
+
+
+class AssignmentIn(BaseModel):
+    """布置作业：教师把浏览时选中的知识点们打包成一页题。"""
+    title: str
+    kp_ids: list[str] = Field(..., min_length=1, max_length=20)
+
+
+class HomeworkAnswerIn(BaseModel):
+    item: int = Field(..., ge=0)
+    choice: int = Field(..., ge=0, le=9)
+    qhash: str | None = None
 
 
 class DiagnoseIn(BaseModel):
@@ -352,6 +373,7 @@ class LoginIn(BaseModel):
 
 
 accounts = Accounts(eng.config.db_path)
+classroom = Classroom(eng.config.db_path, accounts)
 
 
 def _set_session(resp: Response, uid: str) -> None:
@@ -386,6 +408,147 @@ def _writable_student(sid: str, user: dict):
     if stu.owner_id != user["id"]:
         raise HTTPException(404, "学生不存在")
     return stu
+
+
+# ---------------- 班级与作业（教师布置 / 学生作答） ----------------
+
+def _registered_user(user: dict) -> None:
+    """班级是长期协作：数据要能保留，游客不参与。"""
+    if user.get("is_guest"):
+        raise HTTPException(403, "游客模式不能参与班级，请注册后再来（数据可长期保存）")
+
+
+def _classroom_error(e: Exception) -> HTTPException:
+    if isinstance(e, PermissionError):
+        return HTTPException(403, str(e))
+    if isinstance(e, KeyError):
+        return HTTPException(404, "班级或作业不存在（可能已被移出）")
+    return HTTPException(422, str(e))
+
+
+@app.post("/api/classes")
+def create_class(body: ClassIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    """建班：创建者即教师（owner），自动成为第一位成员。"""
+    _registered_user(user)
+    try:
+        return classroom.create_class(user["id"], body.name)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/classes/join")
+def join_class(body: JoinIn, user: dict = Depends(require_user)) -> dict[str, Any]:
+    _registered_user(user)
+    try:
+        return classroom.join(body.code, user["id"])
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/classes")
+def my_classes(user: dict = Depends(require_user)) -> list[dict[str, Any]]:
+    _registered_user(user)
+    try:
+        return classroom.my_classes(user["id"])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.get("/api/classes/{cid}/members")
+def class_members(cid: str, user: dict = Depends(require_user)) -> list[dict[str, Any]]:
+    _registered_user(user)
+    try:
+        return classroom.members(cid, user["id"])
+    except Exception as e:
+        raise _classroom_error(e)
+
+
+@app.post("/api/classes/{cid}/assignments")
+def create_assignment(cid: str, body: AssignmentIn,
+                      user: dict = Depends(require_user)) -> dict[str, Any]:
+    """布置作业：server 把 kp_id 解析成名称快照，保证教师删图也不受影响。"""
+    _registered_user(user)
+    kp_items = []
+    for kid in body.kp_ids:
+        try:
+            kp = eng.dataset.get_kp(kid)
+        except KeyError:
+            raise HTTPException(404, f"知识点不存在：{kid}")
+        kp_items.append({"kp_id": kid, "kp_name": kp.name})
+    try:
+        return classroom.create_assignment(cid, user["id"], body.title, kp_items)
+    except Exception as e:
+        raise _classroom_error(e)
+
+
+@app.get("/api/classes/{cid}/assignments")
+def list_assignments(cid: str, user: dict = Depends(require_user)) -> list[dict[str, Any]]:
+    _registered_user(user)
+    try:
+        return classroom.assignments_for(cid, user["id"])
+    except Exception as e:
+        raise _classroom_error(e)
+
+
+@app.get("/api/classes/{cid}/assignments/{aid}")
+def assignment_detail(cid: str, aid: str,
+                      user: dict = Depends(require_user)) -> dict[str, Any]:
+    _registered_user(user)
+    try:
+        d = classroom.assignment_detail(aid, user["id"])
+        if d["class_id"] != cid:
+            raise KeyError("作业不属于该班级")
+        return d
+    except Exception as e:
+        raise _classroom_error(e)
+
+
+@app.post("/api/classes/{cid}/assignments/{aid}/answer")
+def answer_homework(cid: str, aid: str, body: HomeworkAnswerIn,
+                    user: dict = Depends(require_user)) -> dict[str, Any]:
+    """作业题作答：判分复用 eng.answer_question（掌握度照常更新、qhash 照常核对），
+    额外把结果登记进班级作业进度表。
+
+    注意：成员学号即「自己注册时绑定/新建的那个学习档案」，所有人只能给
+    自己的档案交作业，不存在代写入口。
+    """
+    _registered_user(user)
+    sid = user.get("student_id")
+    if not sid:
+        raise HTTPException(422, "该账号还没有绑定学习档案，请先在档案下拉里新建一个")
+    try:
+        detail = classroom.assignment_detail(aid, user["id"])   # 内含成员资格校验
+        if detail["class_id"] != cid:
+            raise KeyError("作业不属于该班级")
+        items = detail["items"]
+        if not (0 <= body.item < len(items)):
+            raise ValueError(f"题号越界：{body.item}")
+        r = eng.answer_question(sid, items[body.item]["kp_id"],
+                                items[body.item].get("seed", 0),
+                                body.choice, qhash=body.qhash)
+        classroom.record_result(aid, user["id"], body.item, r["correct"], body.choice)
+    except Exception as e:
+        if isinstance(e, QHashMismatch):
+            raise HTTPException(409, str(e))
+        raise _classroom_error(e)
+    done = sum(1 for it in detail["items"] if it["done"]) + 1
+    return {**r,
+            "assignment": {"id": aid, "title": detail["title"],
+                           "item": body.item, "total": len(items),
+                           "done": min(done, len(items))}}
+
+
+@app.get("/api/classes/{cid}/assignments/{aid}/results")
+def assignment_results(cid: str, aid: str,
+                       user: dict = Depends(require_user)) -> dict[str, Any]:
+    _registered_user(user)
+    try:
+        d = classroom.results(aid, user["id"])
+        if d["assignment"]["class_id"] != cid:
+            raise KeyError("作业不属于该班级")
+        return d
+    except Exception as e:
+        raise _classroom_error(e)
 
 # ---------------- LLM 出题设置（前端可视化配置） ----------------
 

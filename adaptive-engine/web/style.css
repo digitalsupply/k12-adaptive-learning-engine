@@ -269,6 +269,33 @@ button.wide { width: 100%; margin-top: 8px; }
 .llm-status .dim { color: #8a94a0; }
 button.subtle { background: #fff; color: #8a94a0; border-color: #dbe2ea; font-size: 12px; }
 button.subtle:hover { border-color: #b9c2cc; color: #6b7480; }
+
+/* 班级面板 */
+.class-box { width: min(520px, 94vw); max-height: 86vh; overflow-y: auto; }
+.class-head { position: relative; margin-bottom: 8px; }
+.class-head .x { position: absolute; right: -8px; top: 0; }
+.class-head h3 { margin: 0 0 4px; font-size: 16px; }
+.cls-row { display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; padding: 8px 10px; border: 1px solid #e8edf2; border-radius: 8px; margin-bottom: 6px; }
+.cls-row .tiny { display: block; margin-top: 2px; }
+.cls-row code { background: #eef4fa; padding: 1px 6px; border-radius: 4px; font-weight: 700; letter-spacing: 1px; }
+.cls-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.cls-actions input { flex: 1 1 130px; }
+.cls-draft { border-top: 1px dashed #dfe6ee; padding-top: 10px; margin-top: 10px; }
+.cchips { line-height: 1.9; font-size: 13.5px; }
+.chips, .chip { }
+.chip { display: inline-block; background: #eaf3fa; border: 1px solid #c9dcef;
+  border-radius: 12px; padding: 2px 9px; font-size: 12px; margin: 2px 4px 2px 0; }
+.chip a { cursor: pointer; opacity: .45; margin-left: 4px; text-decoration: none; }
+.chip a:hover { opacity: 1; }
+.tiny { font-size: 12px; }
+.dim { color: #8a94a0; } .ok { color: #1d7a46; font-weight: 700; } .bad { color: var(--red); font-weight: 700; }
+.matrix table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 6px; }
+.matrix th, .matrix td { border: 1px solid #e3e8ee; padding: 4px 8px; text-align: center; }
+.matrix tbody th, .matrix table > tbody:first-child th { text-align: left; }
+.matrix td.ok { background: #f0faf2; } .matrix td.bad { background: #fdf2f1; }
+.matrix .sum td { background: #f8fafc; color: #59636e; }
+.qr-hw { margin-top: 6px; color: #1c5d8f; font-weight: 600; font-size: 12px; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .auth-tabs button { flex: 1; padding: 6px 0; }
 .auth-tabs button.on { background: #eaf3fa; border-color: var(--accent); color: var(--accent); font-weight: 700; }

@@ -28,6 +28,7 @@ const state = {
   focusRoot: null,         // 聚焦模式的根节点
   cfg: { mastered_threshold: 0.85, low_confidence_hint: 0.6 },
   quiz: null,              // 当前题目 {kp_id, seed, options, answered}
+  hw: null,                // 作业作答上下文 {cid, aid, item, title, total}
 };
 let loadSeq = 0;   // 请求序号：丢弃过期响应，避免竞态
 
@@ -76,6 +77,7 @@ function renderAuthBar() {
     $("logoutBtn").classList.remove("hidden");
     // LLM 设置是全局配置：注册用户可见，游客隐藏
     llmBtn.classList.toggle("hidden", !!state.user.is_guest);
+    $("classBtn").classList.toggle("hidden", !!state.user.is_guest);
   } else {
     who.classList.add("hidden");
     loginBtn.classList.remove("hidden");
@@ -221,6 +223,238 @@ async function llmTest() {
   }
 }
 
+/* ---------------- 班级与作业面板 ---------------- */
+/* 教师：建班 → 抢先浏览知识点（把当前知识点加入作业草稿）→ 生成作业 →
+   之后发放 6 位邀请码给学生。学生：输入邀请码入班 → 点作业题直接作答
+   （判分、掌握度、qhash 校验全复用既有链路）。 */
+
+let classDraft = [];          // 作业草稿 [{kp_id, kp_name}]
+let classDetailCtx = null;    // 当前打开的班级 {id, name, role, join_code}
+let hwCtxCache = new Map();   // aid → 作业详情缓存
+
+async function openClass() { closeLlm(); await renderClassList(); openBox($("classModal")); }
+
+function closeClass() { closeBox($("classModal")); }
+
+/* 弹窗开合的公共小工具：body 滚动锁 + Backdrop 点击关闭 */
+let knownKeydown = null;
+function openBox(modal) {
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  if (!knownKeydown) {
+    knownKeydown = (e) => { if (e.key === "Escape") { closeClass(); closeLlm(); closeAuth(); } };
+    document.addEventListener("keydown", knownKeydown);
+  }
+}
+function closeBox(modal) {
+  modal.classList.add("hidden");
+  if ($("authModal").classList.contains("hidden") &&
+      $("llmModal").classList.contains("hidden") &&
+      $("classModal").classList.contains("hidden")) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+async function renderClassList() {
+  classDetailCtx = null;
+  const head = $("classHead"), body = $("classBody");
+  head.innerHTML = `<h3>班级与作业</h3>`;
+  let classes = [];
+  try { classes = await api("/api/classes"); } catch (e) { showError(e.message); return; }
+  const rows = classes.map(c => `
+    <div class="cls-row">
+      <div>
+        <b>${esc(c.name)}</b>
+        <span class="tiny dim">${c.role === "owner" ? "👨‍🏫 教师" : "🎒 学生"}
+          · ${c.members} 人 · ${c.assignments} 次作业</span>
+        ${c.role === "owner" ? `<span class="tiny">邀请码 <code>${esc(c.join_code)}</code></span>` : ""}
+      </div>
+      <button data-open="${esc(c.id)}">${c.assignments > 0 ? "进入" : "查看"}</button>
+    </div>`).join("") || `<div class="tiny dim">还没有班级。教师可以新建，学生凭邀请码加入。</div>`;
+  body.innerHTML = `
+    ${rows}
+    <div class="cls-actions">
+      <div>
+        <input id="clsNewName" placeholder="新班级名称（1~32 字）">
+        <button id="clsCreate" class="primary">新建班级（我当教师）</button>
+      </div>
+      <div>
+        <input id="clsJoinCode" placeholder="6 位邀请码" maxlength="8">
+        <button id="clsJoin">加入班级</button>
+      </div>
+    </div>`;
+  $("clsCreate").onclick = async () => {
+    try {
+      const c = await post("/api/classes", { name: $("clsNewName").value });
+      classDraft = [];
+      await renderClassDetail(c);
+    } catch (e) { showError(e.message); }
+  };
+  $("clsJoin").onclick = async () => {
+    try {
+      await post("/api/classes/join", { code: $("clsJoinCode").value });
+      await renderClassList();
+    } catch (e) { showError(e.message); }
+  };
+  body.querySelectorAll("[data-open]").forEach(b => {
+    b.onclick = async () => {
+      const c = classes.find(c => c.id === b.dataset.open);
+      await renderClassDetail(c);
+    };
+  });
+}
+
+function draftChipsHtml() {
+  if (!classDraft.length) return `<span class="tiny dim">还没有选知识点。在知识图谱/链里选中一个知识点后，回这里点「把当前知识点加入草稿」。</span>`;
+  return classDraft.map((d, i) =>
+    `<span class="chip">${esc(d.kp_name)}
+       <a data-rm="${i}" title="移除">✕</a></span>`).join(" ");
+}
+
+async function renderClassDetail(c) {
+  classDetailCtx = c;
+  $("classHead").innerHTML =
+    `<button id="clsBack" class="x" title="返回列表">←</button>` +
+    `<h3>${esc(c.name)} ${c.role === "owner" ? "· 教师" : ""}</h3>` +
+    (c.role === "owner"
+      ? `<div class="tiny">邀请码 <code>${esc(c.join_code || "")}</code>（发给学生，他们凭码加入）</div>`
+      : `<div class="tiny dim">你在本班是学生身份</div>`);
+  const body = $("classBody");
+  let list = [];
+  try { list = await api(`/api/classes/${encodeURIComponent(c.id)}/assignments`); }
+  catch (e) { showError(e.message); return; }
+  body.innerHTML = `
+    ${c.role === "owner" ? `
+      <div class="cls-draft">
+        <b>布置新作业</b>
+        <div class="chips">${draftChipsHtml()}</div>
+        <div class="cls-actions" style="margin-top:6px">
+          <button id="clsAddKp" ${state.selectedName ? "" : "disabled"}
+            title="${state.selectedName ? "" : "先在左侧知识图里选一个知识点"}">
+            ➕ 把当前知识点加入草稿${state.selectedName ? `（${esc(state.selectedName)}）` : ""}</button>
+          <input id="asgTitle" placeholder="作业标题（1~60 字）">
+          <button id="asgCreate" class="primary" ${classDraft.length ? "" : "disabled"}>生成作业</button>
+          <button id="clsClear" class="subtle ${classDraft.length ? "" : "hidden"}">清空草稿</button>
+        </div>
+      </div>` : ""}
+    <div class="cls-list">${list.map(a => `
+      <div class="cls-row">
+        <div><b>${esc(a.title)}</b>
+          <span class="tiny dim">${a.total} 题</span>
+          ${c.role === "owner"
+            ? `<span class="tiny dim">全班 ${a.class_done}/${a.members} 人完成
+                 · 对题 ${a.class_correct}</span>`
+            : `<span class="tiny ${a.my_done === a.total ? "ok" : "dim"}">
+                 我已做 ${a.my_done}/${a.total}${a.my_done ? ` · 对 ${a.my_correct}` : ""}</span>`}
+        </div>
+        <div>
+          <button data-hw="${esc(a.id)}" data-total="${a.total}">${a.my_done >= a.total ? "查看" : "去做题"}</button>
+          ${c.role === "owner" ? `<button data-res="${esc(a.id)}">成绩</button>` : ""}
+        </div>
+      </div>`).join("") || `<div class="tiny dim">暂无作业。</div>`}</div>`;
+  if (c.role === "owner") {
+    const addBtn = $("clsAddKp");
+    if (addBtn) addBtn.onclick = () => {
+      if (!state.selected || !state.selectedName) return;
+      if (classDraft.some(d => d.kp_id === state.selected)) { showError("这个知识点已在草稿里"); return; }
+      classDraft.push({ kp_id: state.selected, kp_name: state.selectedName });
+      const btn = $("asgCreate");
+      btn.disabled = false;
+      $("clsClear").classList.remove("hidden");
+      renderDraftRefresh(c);
+    };
+    const cr = $("clsClear");
+    if (cr) cr.onclick = () => { classDraft = []; renderDraftRefresh(c); };
+    const cb = $("asgCreate");
+    if (cb) cb.onclick = async () => {
+      const title = $("asgTitle").value.trim();
+      if (!title || !classDraft.length) { showError("标题和至少一个知识点不能为空"); return; }
+      try {
+        await post(`/api/classes/${encodeURIComponent(c.id)}/assignments`, {
+          title, kp_ids: classDraft.map(d => d.kp_id),
+        });
+        classDraft = [];
+        await renderClassDetail(c);
+      } catch (e) { showError(e.message); }
+    };
+  }
+  body.querySelectorAll("[data-hw]").forEach(b => { b.onclick = () => openAssignment(c, b.dataset.hw, b.dataset.total); });
+  body.querySelectorAll("[data-res]").forEach(b => {
+    b.onclick = async () => await renderResults(c, b.dataset.res);
+  });
+  const backBtn = $("clsBack");
+  if (backBtn) backBtn.onclick = () => { closeBox($("classModal")); openClass(); };
+}
+
+function renderDraftRefresh(c) {
+  // 只刷新草稿区，避免整面板重绘焦点丢失
+  const box = $("classBody").querySelector(".cls-draft");
+  if (!box) return;
+  box.querySelector(".chips").innerHTML = draftChipsHtml();
+  box.querySelectorAll(".chip a[data-rm]").forEach(a => {
+    a.onclick = () => { classDraft.splice(Number(a.dataset.rm), 1); renderDraftRefresh(c); };
+  });
+  $("asgCreate") && ($("asgCreate").disabled = !classDraft.length);
+  $("clsClear") && $("clsClear").classList.toggle("hidden", !classDraft.length);
+}
+
+async function openAssignment(c, aid, total) {
+  const modal = $("classModal"); closeBox(modal);
+  try {
+    const d = await api(`/api/classes/${encodeURIComponent(c.id)}/assignments/${encodeURIComponent(aid)}`);
+    hwCtxCache.set(aid, d);
+    await startHomework(d);
+  } catch (e) { showError(e.message); }
+}
+
+/* 进入某道作业题：走常规知识链 + 出题界面，判分走作业专用的服务端点 */
+async function startHomework(d) {
+  const next = d.items.findIndex(it => !it.done);
+  if (next === -1 && d.items.length) {
+    showError(`「${d.title}」已完成全部 ${d.items.length} 题，可在班级面板查看记录。`);
+    await openClass();
+    await renderClassDetail(classDetailCtx || { id: d.class_id, role: "member", ...d });
+    return;
+  }
+  const it = d.items[Math.max(0, next)];
+  state.hw = {
+    cid: d.class_id, aid: d.id, item: it.index, seed: it.seed,
+    title: d.title, total: d.items.length,
+  };
+  await enterChainView();
+  await selectKp(it.kp_id);
+  await askQuestion(it.kp_id, it.seed);
+}
+
+/* 教师端：全班 × 各题成绩矩阵 */
+async function renderResults(c, aid) {
+  const body = $("classBody");
+  let m;
+  try {
+    m = await api(`/api/classes/${encodeURIComponent(c.id)}/assignments/${encodeURIComponent(aid)}/results`);
+  } catch (e) { showError(e.message); return; }
+  body.innerHTML = `
+    <div class="matrix">
+      <div class="tiny dim">${esc(m.assignment.title)} · 每列一题 · ✓对 ✗错 · 未作答留白</div>
+      <table>
+        <tr><th>学生</th>${m.items.map((it, i) => `<th title="${esc(it.kp_name)}">${i + 1}</th>`).join("")}<th>对/总</th></tr>
+        ${m.rows.map(r => `<tr>
+            <td>${esc(r.username || "-")}</td>
+            ${r.per.map(p => `<td class="${p === 1 ? "ok" : p === 0 ? "bad" : ""}">${p === 1 ? "✓" : p === 0 ? "✗" : "·"}</td>`).join("")}
+            <td>${r.correct}/${m.items.length}</td>
+          </tr>`).join("")}
+        <tr class="sum"><td>全班对题</td>
+          ${m.per_item_correct.map(ok => `<td>${ok}</td>`).join("")}
+          <td>对率合计</td></tr>
+        <tr class="sum"><td>全班已做</td>
+          ${m.per_item_done.map(n => `<td>${n}</td>`).join("")}
+          <td>${m.rows.length} 人</td></tr>
+      </table>
+    </div>`;
+  $("clsBack").onclick = async () => { closeBox($("classModal")); await openClass(); };
+  classDetailCtx = c;
+}
+
 async function llmSave(disable = false) {
   const btn = disable ? $("llmDisable") : $("llmSave");
   if (!disable && (!$("llmBase").value.trim() || !$("llmModel").value.trim())) {
@@ -313,6 +547,13 @@ async function init() {
   $("llmTest").onclick = llmTest;
   $("llmSave").onclick = () => llmSave();
   $("llmDisable").onclick = () => llmSave(true);
+
+  /* ---- 班级面板绑定 ---- */
+  $("classBtn").onclick = openClass;
+  $("classClose").onclick = closeClass;
+  $("classModal").addEventListener("click", (e) => {
+    if (e.target === $("classModal")) closeClass();
+  });
 
   $("showMastered").onchange = renderGraph;
   $("fitBtn").onclick = () => fitView(true);
@@ -738,6 +979,7 @@ function renderKpCard(d) {
   $("emptyHint").classList.add("hidden");
   $("kpCard").classList.remove("hidden");
   $("kpName").textContent = d.name;
+  state.selectedName = d.name;
   $("kpMeta").textContent =
     `${d.grade_band} · ${d.subject} · ${d.grades} · 类型 ${d.kp_type_label} · 难度 ${d.difficulty.toFixed(2)}`;
   state.kpDetail = d;
@@ -811,24 +1053,32 @@ function renderMath(el) {
 /* ---------------- 出题 / 作答 ---------------- */
 
 /* 出一道题。题目由服务端按 (kp_id, seed) 确定性生成，判分也在服务端，
-   这里只负责展示和提交选项。 */
-async function askQuestion() {
-  if (!state.selected) return;
+   这里只负责展示和提交选项。
+   作业场景：state.hw 有值 → 用作业条目的 (kp, seed) 固定出题（全班同题）。 */
+async function askQuestion(kpIdOverride = null, fixedSeed = null) {
+  const kpId = kpIdOverride || state.selected;
+  if (!kpId) return;
+  const hw = state.hw;
+  const seed = hw ? hw.seed : (fixedSeed ?? Math.floor(Math.random() * 1e6));
   const slot = $("quizSlot");
   const btn = $("btnAsk");
   btn.disabled = true;
+  if (!state.selected || state.selected !== kpId) {
+    state.selected = kpId;
+    try { await selectKp(kpId); } catch (_) { /* 详情失败不阻塞出题 */ }
+  }
   slot.innerHTML = `<div class="quiz-none quiz-loading"><span class="spinner"></span>` +
-    `正在出题… AI 命题约需 10~40 秒，同一题之后秒回</div>`;
+    (hw ? `作业「${esc(hw.title)}」第 ${hw.item + 1} 题，正在出题…`
+        : `正在出题… AI 命题约需 10~40 秒，同一题之后秒回`) + `</div>`;
   try {
-    const seed = Math.floor(Math.random() * 1e6);
-    const q = await api(`/api/quiz/${encodeURIComponent(state.selected)}?seed=${seed}`);
+    const q = await api(`/api/quiz/${encodeURIComponent(kpId)}?seed=${seed}`);
     state.quiz = { ...q, answered: false };
     renderQuiz();
-    $("btnNextQ").classList.remove("hidden");
+    $("btnNextQ").classList.toggle("hidden", !!hw);
   } catch (e) {
     // 该知识点没有可用的题目素材（可测评性过低 / 标注缺失）
     state.quiz = null;
-    slot.innerHTML = `<div class="quiz-none">⚠ 该知识点暂无可出题素材（可测评性不足或标注缺失），可用下方自评。</div>`;
+    slot.innerHTML = `<div class="quiz-none">⚠ 该知识点暂无可出题素材（可测评性不足或标注缺失），${hw ? "请告诉教师换一个知识点" : "可用下方自评。"}</div>`;
     $("btnNextQ").classList.add("hidden");
   } finally {
     btn.disabled = false;
@@ -867,14 +1117,28 @@ async function submitAnswer(choice) {
   q.answered = true;
   const slot = $("quizSlot");
   slot.querySelectorAll(".qopt").forEach(b => { b.disabled = true; });
+  const hw = state.hw;
+  const url = hw
+    ? `/api/classes/${encodeURIComponent(hw.cid)}/assignments/${encodeURIComponent(hw.aid)}/answer`
+    : `/api/students/${encodeURIComponent(state.student)}/answer`;
+  const body = hw
+    ? { item: hw.item, choice, qhash: q.qhash }
+    : { kp_id: q.kp_id, seed: q.seed, choice, qhash: q.qhash };
   try {
-    const r = await post(`/api/students/${encodeURIComponent(state.student)}/answer`, {
-      kp_id: q.kp_id, seed: q.seed, choice, qhash: q.qhash,
-    });
+    const r = await post(url, body);
     showQuizResult(r, q);
     updateMasteryAfterAttempt(r);
     if (state.viewMode === "map") await refreshGraphData(); else await loadChain(q.kp_id);
     sendMasteryToFigure(r.p_after);
+    if (hw && r.assignment) {
+      hw.done = r.assignment.done;
+      // 结果栏上标注作业进度
+      const tag = document.createElement("div");
+      tag.className = "qr-hw";
+      tag.textContent = `📘 作业「${hw.title}」进度 ${r.assignment.done}/${r.assignment.total}` +
+        (r.assignment.done >= r.assignment.total ? " · 已全部完成 🎉" : " · 可在班级面板继续下一题");
+      slot.querySelector(".qr").appendChild(tag);
+    }
   } catch (e) {
     showError(e.message);
     q.answered = false;

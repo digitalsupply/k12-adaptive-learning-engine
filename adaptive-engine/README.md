@@ -10,6 +10,7 @@ adaptive-engine/
 │   ├── graph.py          先修 DAG：拓扑序、祖先回溯、分层、枢纽识别、环检测
 │   ├── mastery.py        MasteryModel 接口 + BKT / Elo 两个实现（可插拔）
 │   ├── llm.py            OpenAI 兼容 LLM 客户端（纯标准库；.env 三行配置 + 内置 Provider 表）
+│   ├── classroom.py      班级与作业：教师建班/邀请码、作业布置、全班成绩矩阵
 │   ├── quiz.py           出题：LLM 命题（带完整上下文的命题规范）→ 缓存 → 标注模板兜底
 │   ├── accounts.py       账号：PBKDF2 口令哈希 + HMAC 签名会话 Cookie（纯标准库）
 │   ├── store_sqlite.py   学生档案 SQLite 存储（WAL；与文件版同一套接口）
@@ -22,11 +23,13 @@ adaptive-engine/
 │   └── config.py         全部可调参数（阈值/衰减/回溯深度…）
 ├── cli.py                命令行入口（含 llm-check：一条命令验证 LLM 连通并出样题）
 ├── server.py             FastAPI 服务 + 账号端点 + 归属守卫 + 托管前端/图形资源
-├── web/                  单页前端（知识链视图默认；SVG 全景图可选；无框架依赖）
+├── web/                  单页前端（知识链视图默认；SVG 全景图可选；无框架依赖；
+│                         本地内置 KaTeX 渲染数学公式——vendor/katex，无需外网）
 ├── figures/              交互图形（离线构建的静态 HTML/SVG）
 │   ├── registry.json     图形注册表：知识点 UUID → 图形
 │   └── ohm-lab/          欧姆定律实验台（model / geom / live / build）
-├── tests/                116 个测试：合成图单测 + 真实数据集端到端 + LLM 出题链路 + 账号/存储 + 回归
+├── tests/                130 个测试：合成图单测 + 真实数据集端到端 + LLM 出题链路
+│                         + 账号/存储 + 班级/作业 + LLM 设置 + 回归
 ├── .env.example          LLM 配置样例（复制为 .env 填 Key；.env 已 gitignore）
 ├── pyproject.toml        pytest 配置（pythonpath，任意目录可跑）
 └── data/                 运行时目录（app.db、secret.key、students/、quiz_cache/、cache/，均 gitignore）
@@ -114,8 +117,18 @@ LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度）�
 在读缓存里重建同一道题并核对哈希——缓存被清或换了模型会立即以 **409** 提示
 前端重新抽题，而不是拿另一道题悄悄判分。下发接口永远不含 `answer_index`。
 
+**判分兜底（答案库）**：每道 AI 题生成时把答案/解析/误区按 qhash 持久化到
+`data/question_bank.jsonl`。出题缓存被清后判分仍按原题执行——学生答完一定
+看到「对 + 正确答案推导 + 误区归因」，而不是被告知「题目已刷新」。
+
+**公式排版**：命题规范要求所有数学式走 LaTeX（`$...$`，禁用 √ ² 等字符混写），
+解析须贴合学科特点（数学分步推导、物理定律代入、化学守恒）。前端内置 KaTeX
+本地渲染题干/选项/解析，无需外网 CDN；公式失败退回原样显示，不白屏。
+
 没有配 Key 时也不影响使用：模板路径照常出题（详情见旧模板规则），前端以
-「📝 模板示例」徽标区分「🤖 AI 命题」。
+「📝 模板示例」徽标区分「🤖 AI 命题」。LLM 三要素可在前端「⚙ LLM 设置」
+面板可视化配置：内置预设（OpenCode Go / DeepSeek / 通义 / 智谱 / Ollama 本地）、
+连通性探测显示耗时与模型回复、保存即热生效并写回 `.env`；游客单向只读。
 
 数据覆盖：`learningObjectives` 和 `misconceptions` 在 33,765 个知识点上的
 覆盖率都是 99.8%，其中 81% 的 `assessability ≥ 0.7`。
@@ -126,6 +139,7 @@ LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度）�
 
 - **口令**：PBKDF2-HMAC-SHA256 + 每用户随机盐（12 万次迭代），纯标准库。
 - **会话**：无状态 HMAC 签名 Cookie（`k12_session`，HttpOnly + SameSite=Lax），
+
   服务重启不掉登录态；签名密钥首次启动自动生成到 `data/secret.key`（0600），
   轮换该文件即全员下线。
 - **归属**：学生档案带 `owner_id`。注册自动建档并绑定；写学生的所有端点
@@ -134,6 +148,24 @@ LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度）�
   演示档案（对所有人可见）。
 - **游客模式**：不注册即可完整体验（一键游客账号 + 档案），但不设口令、
   不能再次登录；页面提示“注册后可长期保存”。
+
+### 班级与作业：教师布置、学生作答、全班矩阵
+
+「🏫 班级」面板把教师工作流搬进来：
+
+1. **教师**（任何注册用户可建班，创建者即教师）新建班级，分发 6 位邀请码
+   （去掉了 0/O/1/I 的易混字母表）；
+2. **学生**凭码入班，答疑/掌握度仍落各自的学习档案，与自学数据互通；
+3. **布置作业**：教师浏览图表时把当前知识点加入草稿（1~20 个），起标题生成
+   作业。作业在布置时就固化 `(kp_id, seed)` 对——seed 由作业 id+题号确定性
+   派生，**全班同一道题**，成绩可直接横向比较；
+4. **学生作答**：面板点「去做题」→ 知识链视图按作业题固定 (kp, seed) 出题
+   → 判分复用 `eng.answer_question`（qhash 核对、答案库兜底、掌握度更新、
+   答错归因，全套一致）→ 结果登记进班级进度表；
+5. **教师矩阵**：学生 × 题号的 ✓/✗/· 网格 + 每题全班对题数，一眼看出
+   “哪道题全班都错”——那就是下周要讲的内容。
+
+游客不参与班级（会话是一次性的，数据不保留）；作业相关写操作要求注册。
 
 ### 知识链视图（默认）与全景图
 
@@ -185,6 +217,18 @@ LLM 输出强校验（4 选项唯一、`answer_index` 合法、解析长度）�
 | POST | `/api/auth/guest` | 游客模式（免注册，自动建游客账号+档案） |
 | GET | `/api/auth/me` | 当前用户（未登录返回 `{user: null}`） |
 | POST | `/api/auth/logout` | 退出（清 Cookie） |
+| POST | `/api/classes` | 建班 `{name}`（创建者=教师，自动成为成员；需注册） |
+| POST | `/api/classes/join` | 凭邀请码入班 `{code}`（需注册） |
+| GET | `/api/classes` | 我的班级列表（教师含邀请码；学生不含） |
+| GET | `/api/classes/{cid}/members` | 成员列表（成员可见） |
+| POST | `/api/classes/{cid}/assignments` | 布置作业 `{title, kp_ids}`（教师；server 解析名称快照） |
+| GET | `/api/classes/{cid}/assignments` | 作业列表 + 我的进度（教师含全班完成统计） |
+| GET | `/api/classes/{cid}/assignments/{aid}` | 作业详情：固定 (kp, seed) 题目条目 + 我的状态 |
+| POST | `/api/classes/{cid}/assignments/{aid}/answer` | 作业作答 `{item, choice, qhash}`：判分同普通答题 + 记进度（哈希不符 409） |
+| GET | `/api/classes/{cid}/assignments/{aid}/results` | 全班成绩矩阵（教师） |
+| GET | `/api/llm` | 当前 LLM 配置摘要（密钥只有末 4 位）+ Provider 预设 |
+| POST | `/api/llm/save` | 保存 LLM 配置：热切换 + 写回 `.env`（`{base_url, api_key, model, max_tokens}`；游客 403） |
+| POST | `/api/llm/test` | 连通性探测（不改配置不落盘；游客 403） |
 | POST | `/api/students` | 建学生 `{name, model}`（**需登录**，归属当前用户） |
 | POST | `/api/students/{sid}/attempt` | 记录作答 `{kp_id, correct}`（答错自动归因；需登录 + 归属校验） |
 | POST | `/api/students/{sid}/attempts` | 批量记录作答（整批只写一次档案） |
