@@ -53,7 +53,7 @@ svg:active { cursor: grabbing; }
 .dot.ring { background: transparent; border: 2px solid #8e44ad; }
 .dot.low { background: transparent; border: 2px dashed #95a5a6; }
 
-.side { width: 380px; background: var(--panel); border-left: 1px solid var(--line);
+.side { width: 480px; background: var(--panel); border-left: 1px solid var(--line);
   overflow-y: auto; padding: 14px; }
 .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
   margin-bottom: 14px; }
@@ -89,6 +89,12 @@ button.primary:hover { background: var(--accent); color: #fff; }
 
 /* ---------------- 出题 ---------------- */
 .quiz-slot { margin: 10px 0; }
+/* 行内公式始终与文字同一条基线流动(inline),公式内部允许可横向滚动
+   以防极窄处溢出;整体不再给块级容器留 overflow 裁切 */
+.quiz-prompt .katex, .qopt .katex, .qr-explain .katex {
+  display: inline-block; vertical-align: baseline; }
+.quiz-prompt .katex { max-width: 100%; overflow-x: auto; overflow-y: visible; }
+.quiz-prompt, .qopt { line-height: 1.7; }
 .quiz { border: 1px solid var(--line); border-left: 3px solid var(--accent);
   background: #fbfdff; border-radius: 8px; padding: 10px 12px; }
 .quiz-kind { font-size: 11px; color: var(--muted); letter-spacing: .5px; }
@@ -211,6 +217,7 @@ svg.no-labels .node.root-cause text { display: block; }
 body.modal-open { overflow: hidden; }
 
 @media (max-width: 700px) {
+  .side { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
   .figure-modal { padding: 6px; }
   .figure-modal-box { max-height: 97vh; }
   .figure-frame { height: 76vh; }

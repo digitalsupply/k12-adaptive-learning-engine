@@ -311,11 +311,11 @@ function renderRevCard(q) {
   $("revBody").innerHTML = `
     <div class="rev-card">
       <div class="tiny dim">${esc(q.kp_name)} · seed ${q.seed} · ${src} · 精选库 ${q.curated_counts.approved} 道</div>
-      <div class="quiz-prompt">${esc(q.prompt)}</div>
+      <div class="quiz-prompt">${esc(flat(q.prompt))}</div>
       <div class="rev-opts">
         ${q.options.map((o, i) => `
           <div class="rev-opt ${i === q.answer_index ? "ok" : ""}">
-            <span class="qletter">${letters[i]}</span>${esc(o)}
+            <span class="qletter">${letters[i]}</span>${esc(flat(o))}
             ${i === q.answer_index ? `<b style="margin-left:auto">✓ 正确</b>` : ""}
           </div>`).join("")}
       </div>
@@ -1275,6 +1275,10 @@ function renderKpCard(d) {
 
 function kv(title, inner) { return `<div class="kv"><b>${title}</b><ul>${inner}</ul></div>`; }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+/* 题面/选项压平：LLM 偶发在 $...$ 前后夹换行,而容器是 pre-wrap——
+   换行会被渲染成「公式独占一行,和前后文字分家」。统一折成空格,
+   文字与公式保持在同一条文字流里。 */
+function flat(s) { return String(s ?? "").replace(/[ \t\r]*\n+[ \t\r]*/g, " ").trim(); }
 
 /* 题面/解析里的 $...$、\(..\)、\[..\] 渲染成真正的数学公式（KaTeX 本地内置）。
    throwOnError=false：个别写错的公式退回原样显示，不让整题白屏。 */
@@ -1341,11 +1345,11 @@ function renderQuiz() {
   slot.innerHTML = `
     <div class="quiz">
       <div class="quiz-kind">${q.kind === "judge" ? "判断正误" : "单项选择"}${badge}</div>
-      <div class="quiz-prompt">${esc(q.prompt)}</div>
+      <div class="quiz-prompt">${esc(flat(q.prompt))}</div>
       <div class="quiz-options">
         ${q.options.map((o, i) => `
           <button class="qopt" data-choice="${i}">
-            <span class="qletter">${letters[i]}</span>${esc(o)}
+            <span class="qletter">${letters[i]}</span>${esc(flat(o))}
           </button>`).join("")}
       </div>
       ${(state.user && !state.user.is_guest) ? `
